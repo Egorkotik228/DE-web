@@ -8,7 +8,8 @@ import { getModuleBySlug } from '@/data/modules';
 import { getLesson, getLessonsForModule } from '@/data/lessons';
 import { useProgress } from '@/hooks/useProgress';
 import { WorkerResponse } from '@/types/course';
-import { executeCode } from '@/lib/codeRunner';
+import { workerManager, EngineStatus } from '@/lib/workerManager';
+import { translateError } from '@/utils/errorTranslator';
 import { TechIcon } from '@/components/ui/TechIcon';
 import { ERDiagram } from '@/components/visuals/ERDiagram';
 import { DataFlowPipeline } from '@/components/visuals/DataFlowPipeline';
@@ -79,6 +80,21 @@ export default function LessonClient() {
   // Worker execution and output state
   const [workerResponse, setWorkerResponse] = useState<WorkerResponse | null>(null);
   const [isRunning, setIsRunning] = useState<boolean>(false);
+
+  // Engine status
+  const [engineStatus, setEngineStatus] = useState<EngineStatus>('idle');
+  const [engineMessage, setEngineMessage] = useState<string>('Инициализация ядра...');
+
+  // Preload worker and subscribe to engine status
+  useEffect(() => {
+    if (!currentModule) return;
+    workerManager.preloadEngine(currentModule.engineType);
+    const unsubscribe = workerManager.subscribe(currentModule.engineType, (status, msg) => {
+      setEngineStatus(status);
+      setEngineMessage(msg);
+    });
+    return () => unsubscribe();
+  }, [currentModule]);
 
   // Listen for window resize for desktop vs mobile layout
   useEffect(() => {
@@ -172,29 +188,79 @@ export default function LessonClient() {
   const nextLesson =
     currentIndex < moduleLessons.length - 1 ? moduleLessons[currentIndex + 1] : null;
 
-  // Run code handler
-  const handleRunCode = () => {
+  // Run code handler (Web Worker with 5s timeout protection)
+  const handleRunCode = async () => {
+    if (!currentLesson || !currentModule) return;
     setIsRunning(true);
     if (isMobile) setMobileTab('output');
-    setTimeout(() => {
-      const res = executeCode(code, currentLesson, isBrokenProdMode, false);
+
+    try {
+      const res = await workerManager.execute(
+        currentModule.engineType,
+        'RUN',
+        currentLesson.seedCode,
+        code
+      );
       setWorkerResponse(res);
+    } catch (err: unknown) {
+      const translated = translateError(err as Error, currentModule.engineType);
+      setWorkerResponse({
+        requestId: 'err',
+        status: 'ERROR',
+        executionTimeMs: 0,
+        columns: ['error'],
+        rows: [[translated.friendlyMessage]],
+        errorDetails: translated,
+      });
+    } finally {
       setIsRunning(false);
-    }, 280);
+    }
   };
 
-  // Verify code handler
-  const handleVerifyCode = () => {
+  // Verify code handler (Smart Grader)
+  const handleVerifyCode = async () => {
+    if (!currentLesson || !currentModule) return;
     setIsRunning(true);
     if (isMobile) setMobileTab('output');
-    setTimeout(() => {
-      const res = executeCode(code, currentLesson, isBrokenProdMode, true);
+
+    try {
+      const refCode = isBrokenProdMode
+        ? currentLesson.brokenProdTask.solutionCode
+        : currentLesson.solutionCode;
+      const refConfig = isBrokenProdMode
+        ? currentLesson.brokenProdTask.testConfig
+        : currentLesson.testConfig;
+
+      const res = await workerManager.execute(
+        currentModule.engineType,
+        'VERIFY',
+        currentLesson.seedCode,
+        code,
+        refCode,
+        refConfig
+      );
+
       setWorkerResponse(res);
-      setIsRunning(false);
       if (res.verification?.passed) {
         markLessonCompleted(currentLesson.id, currentModule.slug);
       }
-    }, 380);
+    } catch (err: unknown) {
+      const translated = translateError(err as Error, currentModule.engineType);
+      setWorkerResponse({
+        requestId: 'err',
+        status: 'ERROR',
+        executionTimeMs: 0,
+        columns: ['error'],
+        rows: [[translated.friendlyMessage]],
+        errorDetails: translated,
+        verification: {
+          passed: false,
+          feedback: translated.friendlyMessage,
+        },
+      });
+    } finally {
+      setIsRunning(false);
+    }
   };
 
   // Reset code
@@ -434,6 +500,8 @@ export default function LessonClient() {
                   saveStatus={saveStatus}
                   onResetCode={handleResetCode}
                   brokenIncident={currentLesson.brokenProdTask.incidentDescription}
+                  engineStatus={engineStatus}
+                  engineMessage={engineMessage}
                 />
                 <div className="flex-1 overflow-hidden">
                   {rightPanelTab === 'code' ? (
@@ -499,6 +567,8 @@ export default function LessonClient() {
                     saveStatus={saveStatus}
                     onResetCode={handleResetCode}
                     brokenIncident={currentLesson.brokenProdTask.incidentDescription}
+                    engineStatus={engineStatus}
+                    engineMessage={engineMessage}
                   />
 
                   {/* Editor or Schema Content */}
@@ -558,7 +628,7 @@ export default function LessonClient() {
   );
 }
 
-// Subcomponent: Editor Top Header Bar with Tabs, Autosave, Broken Prod mode
+// Subcomponent: Editor Top Header Bar with Tabs, Autosave, Broken Prod mode, Wasm status
 function EditorHeader({
   rightPanelTab,
   onSetRightPanelTab,
@@ -567,6 +637,8 @@ function EditorHeader({
   saveStatus,
   onResetCode,
   brokenIncident,
+  engineStatus,
+  engineMessage,
 }: {
   rightPanelTab: 'code' | 'schema';
   onSetRightPanelTab: (t: 'code' | 'schema') => void;
@@ -575,6 +647,8 @@ function EditorHeader({
   saveStatus: 'saved' | 'saving';
   onResetCode: () => void;
   brokenIncident: string;
+  engineStatus: EngineStatus;
+  engineMessage: string;
 }) {
   return (
     <div className="flex flex-col shrink-0">
@@ -606,8 +680,32 @@ function EditorHeader({
           </button>
         </div>
 
-        {/* Right Controls: Broken Prod, Autosave, Reset */}
+        {/* Right Controls: Wasm Engine status, Autosave, Reset, Broken Prod */}
         <div className="flex items-center gap-2">
+          {/* Wasm Engine status pill */}
+          <div className="hidden lg:flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-[#21262D] bg-[#151B23] text-[11px] font-mono">
+            {engineStatus === 'loading' ? (
+              <>
+                <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
+                <span className="text-amber-300">⚡ Загрузка ядра Wasm...</span>
+              </>
+            ) : engineStatus === 'running' ? (
+              <>
+                <span className="w-2 h-2 rounded-full bg-blue-400 animate-ping" />
+                <span className="text-blue-300">▶ Выполнение...</span>
+              </>
+            ) : engineStatus === 'error' ? (
+              <>
+                <span className="w-2 h-2 rounded-full bg-red-400" />
+                <span className="text-red-300">Ошибка ядра</span>
+              </>
+            ) : (
+              <>
+                <span className="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_8px_rgba(16,185,129,0.8)]" />
+                <span className="text-emerald-400/90">{engineMessage || '🟢 Ядро готово'}</span>
+              </>
+            )}
+          </div>
           {/* Autosave status indicator */}
           <span className="text-[11px] font-mono text-[#7D8590] hidden sm:inline-flex items-center gap-1">
             {saveStatus === 'saving' ? (
