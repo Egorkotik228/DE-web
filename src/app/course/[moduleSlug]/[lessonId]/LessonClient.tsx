@@ -1,38 +1,148 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
+import { Group, Panel, Separator } from 'react-resizable-panels';
 import { getModuleBySlug } from '@/data/modules';
 import { getLesson, getLessonsForModule } from '@/data/lessons';
 import { useProgress } from '@/hooks/useProgress';
+import { WorkerResponse } from '@/types/course';
+import { executeCode } from '@/lib/codeRunner';
 import { TechIcon } from '@/components/ui/TechIcon';
+import { ERDiagram } from '@/components/visuals/ERDiagram';
+import { DataFlowPipeline } from '@/components/visuals/DataFlowPipeline';
+import { BeforeAfterTable } from '@/components/visuals/BeforeAfterTable';
+import { CalloutBlock } from '@/components/lesson/CalloutBlock';
+import { GlossaryText } from '@/components/lesson/GlossaryText';
+import { BugReportModal } from '@/components/lesson/BugReportModal';
+import { SolutionConfirmModal } from '@/components/lesson/SolutionConfirmModal';
+import { DynamicMonaco } from '@/components/editor/DynamicMonaco';
+import { SchemaPreviewViewer } from '@/components/editor/SchemaPreviewViewer';
+import { OutputConsole } from '@/components/editor/OutputConsole';
 import {
   ChevronLeft,
+  ChevronRight,
   CheckCircle2,
-  AlertTriangle,
-  Lightbulb,
-  HelpCircle,
   Database,
   ArrowRight,
   Flame,
   FileCode,
-  Layers,
+  RotateCcw,
+  Bug,
+  Eye,
+  Check,
+  ChevronDown,
+  BookOpen,
+  Code2,
+  Table,
 } from 'lucide-react';
 
 export default function LessonClient() {
   const params = useParams();
   const router = useRouter();
-  const moduleSlug = Array.isArray(params.moduleSlug) ? params.moduleSlug[0] : (params.moduleSlug as string);
-  const lessonId = Array.isArray(params.lessonId) ? params.lessonId[0] : (params.lessonId as string);
+  const moduleSlug = Array.isArray(params.moduleSlug)
+    ? params.moduleSlug[0]
+    : (params.moduleSlug as string);
+  const lessonId = Array.isArray(params.lessonId)
+    ? params.lessonId[0]
+    : (params.lessonId as string);
 
   const { markLessonCompleted, completedLessonIds } = useProgress();
-  const [activeTab, setActiveTab] = useState<'theory' | 'schema' | 'task' | 'brokenProd'>('theory');
-  const [revealedHintIndex, setRevealedHintIndex] = useState<number>(-1);
 
   const currentModule = getModuleBySlug(moduleSlug);
   const currentLesson = getLesson(moduleSlug, lessonId);
   const moduleLessons = getLessonsForModule(moduleSlug);
+
+  // Responsive mobile state (< 1024px)
+  const [isMobile, setIsMobile] = useState<boolean>(false);
+  const [mobileTab, setMobileTab] = useState<'theory' | 'editor' | 'output'>('theory');
+
+  // Right panel tabs: code or schema
+  const [rightPanelTab, setRightPanelTab] = useState<'code' | 'schema'>('code');
+
+  // Mode: normal vs "Сломанный прод"
+  const [isBrokenProdMode, setIsBrokenProdMode] = useState<boolean>(false);
+
+  // Lesson dropdown open state
+  const [isLessonDropdownOpen, setIsLessonDropdownOpen] = useState(false);
+
+  // Hint spoilers
+  const [revealedHint1, setRevealedHint1] = useState(false);
+  const [revealedHint2, setRevealedHint2] = useState(false);
+  const [revealedSolution, setRevealedSolution] = useState(false);
+
+  // Modals
+  const [isSolutionModalOpen, setIsSolutionModalOpen] = useState(false);
+  const [isBugModalOpen, setIsBugModalOpen] = useState(false);
+
+  // Worker execution and output state
+  const [workerResponse, setWorkerResponse] = useState<WorkerResponse | null>(null);
+  const [isRunning, setIsRunning] = useState<boolean>(false);
+
+  // Listen for window resize for desktop vs mobile layout
+  useEffect(() => {
+    const checkWidth = () => {
+      setIsMobile(window.innerWidth < 1024);
+    };
+    checkWidth();
+    window.addEventListener('resize', checkWidth);
+    return () => window.removeEventListener('resize', checkWidth);
+  }, []);
+
+  const draftKey = currentLesson
+    ? isBrokenProdMode
+      ? `draft_broken_${currentLesson.id}`
+      : `draft_normal_${currentLesson.id}`
+    : '';
+
+  const getInitialCode = () => {
+    if (!currentLesson) return '';
+    if (typeof window !== 'undefined' && draftKey) {
+      try {
+        const saved = localStorage.getItem(draftKey);
+        if (saved !== null) return saved;
+      } catch {
+        // ignore
+      }
+    }
+    return isBrokenProdMode
+      ? currentLesson.brokenProdTask.buggyCode
+      : currentLesson.initialCode;
+  };
+
+  const [code, setCode] = useState<string>(getInitialCode);
+  const [prevDraftKey, setPrevDraftKey] = useState<string>(draftKey);
+  const [saveStatus, setSaveStatus] = useState<'saved' | 'saving'>('saved');
+
+  // Adjust state when draftKey changes without effect cascading
+  if (draftKey !== prevDraftKey) {
+    setPrevDraftKey(draftKey);
+    setCode(getInitialCode());
+    setSaveStatus('saved');
+    setWorkerResponse(null);
+  }
+
+  // Handle user code edits
+  const handleCodeChange = (newCode: string) => {
+    setCode(newCode);
+    setSaveStatus('saving');
+  };
+
+  // Debounced autosave (1500 ms)
+  useEffect(() => {
+    if (saveStatus !== 'saving' || !draftKey) return;
+    const timer = setTimeout(() => {
+      try {
+        localStorage.setItem(draftKey, code);
+        setSaveStatus('saved');
+      } catch {
+        // ignore storage error
+      }
+    }, 1500);
+
+    return () => clearTimeout(timer);
+  }, [code, draftKey, saveStatus]);
 
   if (!currentModule || !currentLesson) {
     return (
@@ -56,437 +166,679 @@ export default function LessonClient() {
 
   const isCompleted = completedLessonIds.includes(currentLesson.id);
 
-  // Find next and previous lessons
+  // Lesson pagination
   const currentIndex = moduleLessons.findIndex((l) => l.id === currentLesson.id);
-  const nextLesson = currentIndex < moduleLessons.length - 1 ? moduleLessons[currentIndex + 1] : null;
+  const prevLesson = currentIndex > 0 ? moduleLessons[currentIndex - 1] : null;
+  const nextLesson =
+    currentIndex < moduleLessons.length - 1 ? moduleLessons[currentIndex + 1] : null;
 
-  const handleComplete = () => {
-    markLessonCompleted(currentLesson.id, currentModule.slug);
-    if (nextLesson) {
-      router.push(`/course/${currentModule.slug}/${nextLesson.id}`);
-    } else {
-      router.push('/');
+  // Run code handler
+  const handleRunCode = () => {
+    setIsRunning(true);
+    if (isMobile) setMobileTab('output');
+    setTimeout(() => {
+      const res = executeCode(code, currentLesson, isBrokenProdMode, false);
+      setWorkerResponse(res);
+      setIsRunning(false);
+    }, 280);
+  };
+
+  // Verify code handler
+  const handleVerifyCode = () => {
+    setIsRunning(true);
+    if (isMobile) setMobileTab('output');
+    setTimeout(() => {
+      const res = executeCode(code, currentLesson, isBrokenProdMode, true);
+      setWorkerResponse(res);
+      setIsRunning(false);
+      if (res.verification?.passed) {
+        markLessonCompleted(currentLesson.id, currentModule.slug);
+      }
+    }, 380);
+  };
+
+  // Reset code
+  const handleResetCode = () => {
+    const defaultCode = isBrokenProdMode
+      ? currentLesson.brokenProdTask.buggyCode
+      : currentLesson.initialCode;
+    setCode(defaultCode);
+    const storageKey = isBrokenProdMode
+      ? `draft_broken_${currentLesson.id}`
+      : `draft_normal_${currentLesson.id}`;
+    try {
+      localStorage.removeItem(storageKey);
+    } catch {
+      // ignore
     }
   };
 
   return (
     <div className="h-screen overflow-hidden flex flex-col bg-[#0D1117] text-[#E6EDF3]">
-      {/* Top Header */}
-      <header className="h-14 border-b border-[#21262D] bg-[#090C10] px-6 flex items-center justify-between shrink-0">
+      {/* 1. Upper Lesson Navigation Bar */}
+      <header className="h-16 border-b border-[#21262D] bg-[#090C10] px-4 md:px-6 flex items-center justify-between shrink-0 z-30 select-none">
+        {/* Left: Back to Stack & Dropdown Lesson Selector */}
         <div className="flex items-center gap-3">
           <Link
             href="/"
-            className="flex items-center gap-1.5 text-xs text-[#7D8590] hover:text-[#E6EDF3] transition-colors"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#151B23] border border-[#21262D] hover:border-[#30363D] text-xs font-medium text-[#E6EDF3] transition-colors"
           >
-            <ChevronLeft className="w-4 h-4" />
-            <span>Карта Стека</span>
+            <ChevronLeft className="w-4 h-4 text-[#7D8590]" />
+            <span className="hidden sm:inline">Карта стека</span>
           </Link>
 
-          <span className="text-[#21262D]">•</span>
+          <span className="text-[#21262D] hidden sm:inline">•</span>
 
-          <div className="flex items-center gap-2">
-            <TechIcon slug={currentModule.slug} size={16} />
-            <span className="text-xs font-medium text-[#7D8590]">{currentModule.title}</span>
-            <span className="text-[#21262D]">•</span>
-            <span className="text-xs font-semibold text-[#E6EDF3] truncate max-w-sm">
-              Урок {currentLesson.order}: {currentLesson.title}
-            </span>
+          {/* Module Tech Icon and Dropdown Selector */}
+          <div className="relative">
+            <button
+              onClick={() => setIsLessonDropdownOpen(!isLessonDropdownOpen)}
+              className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-[#151B23] border border-[#21262D] hover:border-emerald-500/40 text-xs text-[#E6EDF3] transition-all cursor-pointer"
+            >
+              <TechIcon slug={currentModule.slug} size={16} />
+              <span className="font-semibold text-emerald-400 hidden sm:inline">
+                {currentModule.title}:
+              </span>
+              <span className="font-medium truncate max-w-[180px] md:max-w-[280px]">
+                Урок {currentLesson.order}. {currentLesson.title}
+              </span>
+              <ChevronDown className="w-3.5 h-3.5 text-[#7D8590] ml-1" />
+            </button>
+
+            {/* Dropdown Menu */}
+            {isLessonDropdownOpen && (
+              <div
+                className="absolute left-0 top-full mt-2 w-80 md:w-96 bg-[#151B23] border border-[#21262D] rounded-xl shadow-2xl p-2 z-50 animate-in fade-in zoom-in-95 duration-150 max-h-[70vh] overflow-y-auto scrollbar-thin scrollbar-thumb-[#21262D]"
+                onClick={() => setIsLessonDropdownOpen(false)}
+              >
+                <div className="px-3 py-2 text-[11px] font-mono text-[#7D8590] uppercase tracking-wider border-b border-[#21262D]">
+                  Уроки раздела ({moduleLessons.length})
+                </div>
+
+                <div className="space-y-1 py-1">
+                  {moduleLessons.map((l) => {
+                    const lDone = completedLessonIds.includes(l.id);
+                    const lActive = l.id === currentLesson.id;
+                    return (
+                      <Link
+                        key={l.id}
+                        href={`/course/${currentModule.slug}/${l.id}`}
+                        className={`flex items-center justify-between px-3 py-2 rounded-lg text-xs transition-colors ${
+                          lActive
+                            ? 'bg-[#21262D] text-emerald-400 font-bold'
+                            : 'text-[#E6EDF3] hover:bg-[#21262D]/60'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2">
+                          <span className="w-5 text-[11px] font-mono text-[#7D8590]">#{l.order}</span>
+                          <span className="truncate">{l.title}</span>
+                        </div>
+                        {lDone && <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />}
+                      </Link>
+                    );
+                  })}
+                </div>
+
+                {/* Upcoming Topics from Curriculum */}
+                <div className="px-3 py-2 mt-2 text-[10px] font-mono text-[#7D8590] uppercase tracking-wider border-t border-[#21262D]">
+                  Темы программы раздела:
+                </div>
+                <div className="px-3 py-1 space-y-1 text-[11px] text-[#7D8590]">
+                  {currentModule.curriculumTopics.map((topic, i) => (
+                    <div key={i} className="flex items-start gap-1.5 leading-snug">
+                      <span className="text-emerald-500/70 shrink-0">•</span>
+                      <span>{topic}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         </div>
 
-        <div className="flex items-center gap-3">
-          {isCompleted && (
-            <span className="text-xs font-medium text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2.5 py-1 rounded-md flex items-center gap-1.5">
-              <CheckCircle2 className="w-3.5 h-3.5" />
-              Пройден
+        {/* Right: Prev, Next & Complete */}
+        <div className="flex items-center gap-2">
+          {/* Prev Lesson Button */}
+          {prevLesson ? (
+            <Link
+              href={`/course/${currentModule.slug}/${prevLesson.id}`}
+              className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-[#151B23] border border-[#21262D] hover:bg-[#21262D] text-xs text-[#E6EDF3] transition-colors"
+              title={`Предыдущий: ${prevLesson.title}`}
+            >
+              <ChevronLeft className="w-4 h-4" />
+              <span className="hidden md:inline">Назад</span>
+            </Link>
+          ) : (
+            <span className="px-2.5 py-1.5 rounded-lg text-xs text-[#7D8590]/40 border border-[#21262D]/40 cursor-not-allowed hidden md:inline-flex items-center gap-1">
+              <ChevronLeft className="w-4 h-4" />
+              <span>Назад</span>
             </span>
           )}
 
+          {/* Next Lesson Button */}
+          {nextLesson ? (
+            <Link
+              href={`/course/${currentModule.slug}/${nextLesson.id}`}
+              className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-[#151B23] border border-[#21262D] hover:bg-[#21262D] text-xs text-[#E6EDF3] transition-colors"
+              title={`Следующий: ${nextLesson.title}`}
+            >
+              <span className="hidden md:inline">Вперед</span>
+              <ChevronRight className="w-4 h-4" />
+            </Link>
+          ) : (
+            <span className="px-2.5 py-1.5 rounded-lg text-xs text-[#7D8590]/40 border border-[#21262D]/40 cursor-not-allowed hidden md:inline-flex items-center gap-1">
+              <span>Вперед</span>
+              <ChevronRight className="w-4 h-4" />
+            </span>
+          )}
+
+          <div className="h-4 w-[1px] bg-[#21262D] mx-1" />
+
+          {/* Complete Lesson CTA */}
           <button
-            onClick={handleComplete}
-            className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold bg-emerald-500 hover:bg-emerald-600 text-black transition-colors"
+            onClick={() => {
+              markLessonCompleted(currentLesson.id, currentModule.slug);
+              if (nextLesson) {
+                router.push(`/course/${currentModule.slug}/${nextLesson.id}`);
+              } else {
+                router.push('/');
+              }
+            }}
+            className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold bg-emerald-500 hover:bg-emerald-600 text-black transition-colors shadow-md shadow-emerald-500/10 cursor-pointer"
           >
-            <span>{nextLesson ? 'Завершить и далее' : 'Завершить модуль'}</span>
-            <ArrowRight className="w-3.5 h-3.5" />
+            {isCompleted ? (
+              <>
+                <Check className="w-3.5 h-3.5 stroke-[3]" />
+                <span className="hidden sm:inline">Пройдено</span>
+              </>
+            ) : (
+              <>
+                <span>Завершить</span>
+                <ArrowRight className="w-3.5 h-3.5" />
+              </>
+            )}
           </button>
         </div>
       </header>
 
-      {/* Main Content Area */}
-      <div className="flex-1 flex overflow-hidden">
-        {/* Left Side: Theory & Schema (Scrollable) */}
-        <div className="flex-1 flex flex-col border-r border-[#21262D] overflow-hidden bg-[#0D1117]">
-          {/* Navigation Tabs */}
-          <div className="h-11 px-6 border-b border-[#21262D] bg-[#090C10] flex items-center gap-2 shrink-0">
-            <button
-              onClick={() => setActiveTab('theory')}
-              className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
-                activeTab === 'theory'
-                  ? 'bg-[#151B23] text-emerald-400 border border-emerald-500/20'
-                  : 'text-[#7D8590] hover:text-[#E6EDF3]'
-              }`}
-            >
-              📖 Теория и Архитектура
-            </button>
-            <button
-              onClick={() => setActiveTab('schema')}
-              className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
-                activeTab === 'schema'
-                  ? 'bg-[#151B23] text-emerald-400 border border-emerald-500/20'
-                  : 'text-[#7D8590] hover:text-[#E6EDF3]'
-              }`}
-            >
-              📊 Схема данных ({currentLesson.schemaPreview.length})
-            </button>
-            <button
-              onClick={() => setActiveTab('task')}
-              className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
-                activeTab === 'task'
-                  ? 'bg-[#151B23] text-emerald-400 border border-emerald-500/20'
-                  : 'text-[#7D8590] hover:text-[#E6EDF3]'
-              }`}
-            >
-              🎯 Практическое задание
-            </button>
-            <button
-              onClick={() => setActiveTab('brokenProd')}
-              className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors flex items-center gap-1.5 ${
-                activeTab === 'brokenProd'
-                  ? 'bg-red-500/10 text-red-400 border border-red-500/30'
-                  : 'text-amber-400/80 hover:text-amber-300'
-              }`}
-            >
-              <Flame className="w-3.5 h-3.5 fill-current" />
-              <span>Сломанный прод</span>
-            </button>
-          </div>
+      {/* 2. Mobile Tab Switcher (< 1024px) */}
+      {isMobile && (
+        <div className="h-10 px-4 border-b border-[#21262D] bg-[#090C10] flex items-center justify-around text-xs shrink-0">
+          <button
+            onClick={() => setMobileTab('theory')}
+            className={`flex items-center gap-1.5 py-1.5 px-3 rounded-md transition-colors ${
+              mobileTab === 'theory'
+                ? 'bg-[#151B23] text-emerald-400 font-bold border border-emerald-500/30'
+                : 'text-[#7D8590]'
+            }`}
+          >
+            <BookOpen className="w-3.5 h-3.5" />
+            <span>📖 Теория и Задача</span>
+          </button>
 
-          {/* Tab 1: Theory */}
-          {activeTab === 'theory' && (
-            <div className="flex-1 overflow-y-auto p-8 space-y-8 scrollbar-thin scrollbar-thumb-[#21262D]">
-              <div>
-                <div className="flex items-center gap-2 text-xs font-mono text-emerald-400 mb-2">
-                  <span>{currentModule.title}</span>
-                  <span>•</span>
-                  <span>{currentLesson.estimatedMinutes} мин чтения</span>
-                </div>
-                <h1 className="text-2xl font-bold text-[#E6EDF3] leading-snug">{currentLesson.title}</h1>
+          <button
+            onClick={() => setMobileTab('editor')}
+            className={`flex items-center gap-1.5 py-1.5 px-3 rounded-md transition-colors ${
+              mobileTab === 'editor'
+                ? 'bg-[#151B23] text-emerald-400 font-bold border border-emerald-500/30'
+                : 'text-[#7D8590]'
+            }`}
+          >
+            <Code2 className="w-3.5 h-3.5" />
+            <span>💻 Редактор</span>
+          </button>
+
+          <button
+            onClick={() => setMobileTab('output')}
+            className={`flex items-center gap-1.5 py-1.5 px-3 rounded-md transition-colors ${
+              mobileTab === 'output'
+                ? 'bg-[#151B23] text-emerald-400 font-bold border border-emerald-500/30'
+                : 'text-[#7D8590]'
+            }`}
+          >
+            <Table className="w-3.5 h-3.5" />
+            <span>📊 Результат</span>
+          </button>
+        </div>
+      )}
+
+      {/* 3. Main Workspace Area: Adaptive Split-Screen or Mobile View */}
+      <div className="flex-1 overflow-hidden">
+        {isMobile ? (
+          /* Mobile Single-Tab View */
+          <div className="h-full w-full overflow-hidden flex flex-col">
+            {mobileTab === 'theory' && (
+              <div className="flex-1 overflow-y-auto p-6 space-y-6">
+                {/* Theory & Visuals */}
+                <TheoryContent
+                  currentLesson={currentLesson}
+                  currentModule={currentModule}
+                  revealedHint1={revealedHint1}
+                  revealedHint2={revealedHint2}
+                  revealedSolution={revealedSolution}
+                  onRevealHint1={() => setRevealedHint1(true)}
+                  onRevealHint2={() => setRevealedHint2(true)}
+                  onOpenSolutionModal={() => setIsSolutionModalOpen(true)}
+                  onOpenBugReport={() => setIsBugModalOpen(true)}
+                />
               </div>
+            )}
 
-              {/* Theory Blocks Rendering */}
-              {currentLesson.theoryBlocks.map((block, idx) => {
-                if (block.type === 'markdown') {
-                  return (
-                    <div
-                      key={idx}
-                      className="text-sm text-[#E6EDF3] leading-relaxed whitespace-pre-wrap font-sans"
-                    >
-                      {block.content}
-                    </div>
-                  );
-                }
-
-                if (block.type === 'callout') {
-                  const isAnalogy = block.variant === 'analogy';
-                  const isDanger = block.variant === 'prod-danger';
-                  const isInterview = block.variant === 'interview';
-
-                  return (
-                    <div
-                      key={idx}
-                      className={`rounded-xl border p-5 space-y-2 ${
-                        isAnalogy
-                          ? 'bg-[#151B23] border-sky-500/30 text-sky-100'
-                          : isDanger
-                          ? 'bg-amber-950/20 border-amber-500/40 text-amber-100'
-                          : 'bg-emerald-950/20 border-emerald-500/40 text-emerald-100'
-                      }`}
-                    >
-                      <div className="flex items-center gap-2 font-semibold text-sm">
-                        {isAnalogy && <Lightbulb className="w-4 h-4 text-sky-400" />}
-                        {isDanger && <AlertTriangle className="w-4 h-4 text-amber-400" />}
-                        {isInterview && <HelpCircle className="w-4 h-4 text-emerald-400" />}
-                        <span>{block.title}</span>
-                      </div>
-                      <div className="text-xs leading-relaxed opacity-90 whitespace-pre-wrap">
-                        {block.content}
-                      </div>
-                    </div>
-                  );
-                }
-
-                if (block.type === 'er-diagram') {
-                  return (
-                    <div key={idx} className="border border-[#21262D] rounded-xl bg-[#090C10] p-5 space-y-4">
-                      <div className="flex items-center gap-2">
-                        <Layers className="w-4 h-4 text-emerald-400" />
-                        <h4 className="text-xs font-bold uppercase tracking-wider text-[#E6EDF3]">
-                          {block.data.title || 'Схема сущностей (ER Diagram)'}
-                        </h4>
-                      </div>
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        {block.data.tables.map((tbl) => (
-                          <div key={tbl.name} className="bg-[#151B23] border border-[#21262D] rounded-lg overflow-hidden">
-                            <div className="px-3 py-2 bg-[#0D1117] border-b border-[#21262D] flex items-center justify-between">
-                              <span className="text-xs font-mono font-bold text-emerald-400">{tbl.name}</span>
-                              <span className="text-[10px] font-mono text-[#7D8590] uppercase">{tbl.role || 'table'}</span>
-                            </div>
-                            <div className="p-2 space-y-1">
-                              {tbl.columns.map((col) => (
-                                <div key={col.name} className="flex items-center justify-between text-[11px] font-mono px-2 py-0.5 rounded hover:bg-[#21262D]/50">
-                                  <div className="flex items-center gap-1.5">
-                                    {col.keyType && col.keyType !== 'none' && (
-                                      <span className="text-[9px] px-1 rounded bg-amber-500/10 text-amber-400 font-bold border border-amber-500/20">
-                                        {col.keyType}
-                                      </span>
-                                    )}
-                                    <span className="text-[#E6EDF3]">{col.name}</span>
-                                  </div>
-                                  <span className="text-[#7D8590] text-[10px]">{col.type}</span>
-                                </div>
-                              ))}
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  );
-                }
-
-                if (block.type === 'before-after-table') {
-                  return (
-                    <div key={idx} className="border border-[#21262D] rounded-xl bg-[#090C10] p-5 space-y-4">
-                      <h4 className="text-xs font-bold uppercase tracking-wider text-[#E6EDF3]">
-                        {block.data.title || 'Сравнение данных: ДО и ПОСЛЕ'}
-                      </h4>
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        {/* ДО */}
-                        <div className="bg-[#151B23] border border-[#21262D] rounded-lg p-3 space-y-2">
-                          <span className="text-[11px] font-medium text-amber-400 block">{block.data.beforeDescription}</span>
-                          <table className="w-full text-left text-[11px] font-mono border-collapse">
-                            <thead>
-                              <tr className="border-b border-[#21262D] text-[#7D8590]">
-                                {block.data.beforeColumns.map((col) => (
-                                  <th key={col} className="pb-1 pr-2">{col}</th>
-                                ))}
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {block.data.beforeRows.map((row, rIdx) => (
-                                <tr key={rIdx} className="border-b border-[#21262D]/40 text-[#E6EDF3]">
-                                  {row.map((cell, cIdx) => (
-                                    <td key={cIdx} className="py-1 pr-2">{String(cell)}</td>
-                                  ))}
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
-
-                        {/* ПОСЛЕ */}
-                        <div className="bg-[#151B23] border border-emerald-500/30 rounded-lg p-3 space-y-2">
-                          <span className="text-[11px] font-medium text-emerald-400 block">{block.data.afterDescription}</span>
-                          <table className="w-full text-left text-[11px] font-mono border-collapse">
-                            <thead>
-                              <tr className="border-b border-emerald-500/20 text-[#7D8590]">
-                                {block.data.afterColumns.map((col) => (
-                                  <th key={col} className="pb-1 pr-2">{col}</th>
-                                ))}
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {block.data.afterRows.map((row, rIdx) => (
-                                <tr key={rIdx} className="border-b border-[#21262D]/40 text-emerald-200">
-                                  {row.map((cell, cIdx) => (
-                                    <td key={cIdx} className="py-1 pr-2">{String(cell)}</td>
-                                  ))}
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
-                      </div>
-                    </div>
-                  );
-                }
-
-                return null;
-              })}
-
-              {/* Glossary Terms */}
-              {currentLesson.glossaryTerms.length > 0 && (
-                <div className="pt-6 border-t border-[#21262D] space-y-3">
-                  <h4 className="text-xs font-bold uppercase tracking-wider text-[#7D8590]">
-                    Термины урока (Glossary)
-                  </h4>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    {currentLesson.glossaryTerms.map((gt) => (
-                      <div key={gt.term} className="bg-[#151B23] border border-[#21262D] p-3 rounded-lg space-y-1">
-                        <span className="text-xs font-mono font-bold text-emerald-400">{gt.term}</span>
-                        <p className="text-[11px] text-[#7D8590] leading-snug">{gt.definition}</p>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Tab 2: Schema */}
-          {activeTab === 'schema' && (
-            <div className="flex-1 overflow-y-auto p-8 space-y-6 scrollbar-thin scrollbar-thumb-[#21262D]">
-              <h3 className="text-base font-semibold text-[#E6EDF3]">Схема таблиц базы данных</h3>
-              {currentLesson.schemaPreview.map((schema) => (
-                <div key={schema.tableName} className="bg-[#151B23] border border-[#21262D] rounded-xl overflow-hidden">
-                  <div className="px-4 py-3 bg-[#090C10] border-b border-[#21262D] flex items-center justify-between">
-                    <div>
-                      <span className="font-mono text-sm font-bold text-emerald-400">{schema.tableName}</span>
-                      {schema.description && <p className="text-xs text-[#7D8590] mt-0.5">{schema.description}</p>}
-                    </div>
-                    <span className="text-xs font-mono text-[#7D8590]">{schema.columns.length} колонок</span>
-                  </div>
-
-                  <div className="p-4 overflow-x-auto">
-                    <table className="w-full text-left font-mono text-xs border-collapse">
-                      <thead>
-                        <tr className="border-b border-[#21262D] text-[#7D8590]">
-                          <th className="pb-2">Колонка</th>
-                          <th className="pb-2">Тип</th>
-                          <th className="pb-2">Ключ</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {schema.columns.map((col) => (
-                          <tr key={col.name} className="border-b border-[#21262D]/40">
-                            <td className="py-1.5 text-[#E6EDF3]">{col.name}</td>
-                            <td className="py-1.5 text-[#7D8590]">{col.type}</td>
-                            <td className="py-1.5 text-amber-400 font-bold">{col.keyType || '—'}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-
-                  {schema.sampleRows.length > 0 && (
-                    <div className="px-4 py-3 bg-[#0D1117] border-t border-[#21262D]">
-                      <span className="text-[11px] font-mono text-[#7D8590] block mb-2">Примеры строк:</span>
-                      <pre className="text-[10px] font-mono text-emerald-400/90 overflow-x-auto">
-                        {JSON.stringify(schema.sampleRows, null, 2)}
-                      </pre>
-                    </div>
+            {mobileTab === 'editor' && (
+              <div className="flex-1 flex flex-col overflow-hidden">
+                <EditorHeader
+                  rightPanelTab={rightPanelTab}
+                  onSetRightPanelTab={setRightPanelTab}
+                  isBrokenProdMode={isBrokenProdMode}
+                  onToggleBrokenProd={() => setIsBrokenProdMode(!isBrokenProdMode)}
+                  saveStatus={saveStatus}
+                  onResetCode={handleResetCode}
+                  brokenIncident={currentLesson.brokenProdTask.incidentDescription}
+                />
+                <div className="flex-1 overflow-hidden">
+                  {rightPanelTab === 'code' ? (
+                    <DynamicMonaco
+                      value={code}
+                      onChange={handleCodeChange}
+                      language={currentModule.engineType}
+                      onRunCode={handleRunCode}
+                    />
+                  ) : (
+                    <SchemaPreviewViewer schemas={currentLesson.schemaPreview} />
                   )}
                 </div>
-              ))}
-            </div>
-          )}
-
-          {/* Tab 3: Task */}
-          {activeTab === 'task' && (
-            <div className="flex-1 overflow-y-auto p-8 space-y-6 scrollbar-thin scrollbar-thumb-[#21262D]">
-              <div className="bg-[#151B23] border border-[#21262D] rounded-xl p-6 space-y-4">
-                <h3 className="text-base font-semibold text-[#E6EDF3] flex items-center gap-2">
-                  <span>🎯</span> Техническое задание (ТЗ)
-                </h3>
-                <p className="text-sm text-[#E6EDF3] leading-relaxed whitespace-pre-wrap">
-                  {currentLesson.taskDescription}
-                </p>
               </div>
+            )}
 
-              {/* Hints */}
-              <div className="space-y-3">
-                <h4 className="text-xs font-bold uppercase tracking-wider text-[#7D8590]">
-                  Подсказки к заданию
-                </h4>
-                {currentLesson.hints.map((hint, hIdx) => {
-                  const isRevealed = revealedHintIndex >= hIdx;
-                  return (
-                    <div key={hIdx} className="bg-[#151B23] border border-[#21262D] rounded-lg p-3 text-xs">
-                      {isRevealed ? (
-                        <div className="space-y-1">
-                          <span className="font-semibold text-emerald-400">Подсказка #{hIdx + 1}:</span>
-                          <p className="text-[#E6EDF3]">{hint}</p>
-                        </div>
-                      ) : (
-                        <button
-                          onClick={() => setRevealedHintIndex(hIdx)}
-                          className="text-[#7D8590] hover:text-[#E6EDF3] flex items-center gap-2"
-                        >
-                          <Lightbulb className="w-3.5 h-3.5 text-amber-400" />
-                          <span>Показать подсказку #{hIdx + 1} {hIdx === 2 ? '(Полное решение)' : ''}</span>
-                        </button>
-                      )}
-                    </div>
-                  );
-                })}
+            {mobileTab === 'output' && (
+              <div className="flex-1 flex flex-col overflow-hidden">
+                <OutputConsole
+                  response={workerResponse}
+                  isRunning={isRunning}
+                  onRunCode={handleRunCode}
+                  onVerifyCode={handleVerifyCode}
+                  testConfig={currentLesson.testConfig}
+                />
               </div>
-            </div>
-          )}
+            )}
+          </div>
+        ) : (
+          /* Desktop Split-Screen using react-resizable-panels Group/Panel/Separator */
+          <Group orientation="horizontal" className="h-full w-full">
+            {/* Left Panel: Theory, Diagrams, Glossary, Spoilers (45% default) */}
+            <Panel defaultSize="45%" minSize="25%" className="h-full overflow-y-auto p-8 space-y-8 bg-[#0D1117] scrollbar-thin scrollbar-thumb-[#21262D]">
+              <TheoryContent
+                currentLesson={currentLesson}
+                currentModule={currentModule}
+                revealedHint1={revealedHint1}
+                revealedHint2={revealedHint2}
+                revealedSolution={revealedSolution}
+                onRevealHint1={() => setRevealedHint1(true)}
+                onRevealHint2={() => setRevealedHint2(true)}
+                onOpenSolutionModal={() => setIsSolutionModalOpen(true)}
+                onOpenBugReport={() => setIsBugModalOpen(true)}
+              />
+            </Panel>
 
-          {/* Tab 4: Broken Prod Task */}
-          {activeTab === 'brokenProd' && (
-            <div className="flex-1 overflow-y-auto p-8 space-y-6 scrollbar-thin scrollbar-thumb-[#21262D]">
-              <div className="bg-red-950/20 border border-red-500/40 rounded-xl p-6 space-y-4">
-                <div className="flex items-center gap-2 text-red-400 font-bold text-sm">
-                  <Flame className="w-4 h-4 fill-current" />
-                  <span>{currentLesson.brokenProdTask.title}</span>
-                </div>
-                <p className="text-xs text-[#E6EDF3] leading-relaxed">
-                  {currentLesson.brokenProdTask.incidentDescription}
-                </p>
-              </div>
+            {/* Vertical Resizable Separator */}
+            <Separator className="w-1.5 bg-[#21262D] hover:bg-emerald-500/50 transition-colors cursor-col-resize flex items-center justify-center">
+              <div className="h-8 w-0.5 bg-[#7D8590] rounded-full" />
+            </Separator>
 
-              <div className="bg-[#151B23] border border-[#21262D] rounded-xl p-4 space-y-2">
-                <span className="text-xs font-semibold text-amber-400 block">Багованный код в проде:</span>
-                <pre className="p-3 bg-[#090C10] border border-[#21262D] rounded-lg font-mono text-xs text-red-300 overflow-x-auto">
-                  {currentLesson.brokenProdTask.buggyCode}
-                </pre>
-              </div>
+            {/* Right Panel: Workspace IDE & Bottom Output Console (55% default) */}
+            <Panel defaultSize="55%" minSize="30%" className="h-full overflow-hidden flex flex-col bg-[#090C10]">
+              <Group orientation="vertical" className="h-full w-full">
+                {/* Top IDE Panel: Editor or Schema (~60% default) */}
+                <Panel defaultSize="60%" minSize="30%" className="overflow-hidden flex flex-col">
+                  {/* Top Editor Header */}
+                  <EditorHeader
+                    rightPanelTab={rightPanelTab}
+                    onSetRightPanelTab={setRightPanelTab}
+                    isBrokenProdMode={isBrokenProdMode}
+                    onToggleBrokenProd={() => setIsBrokenProdMode(!isBrokenProdMode)}
+                    saveStatus={saveStatus}
+                    onResetCode={handleResetCode}
+                    brokenIncident={currentLesson.brokenProdTask.incidentDescription}
+                  />
 
-              <div className="bg-[#151B23] border border-emerald-500/30 rounded-xl p-4 space-y-2">
-                <span className="text-xs font-semibold text-emerald-400 block">💡 Подсказка к исправлению:</span>
-                <p className="text-xs text-[#E6EDF3]">{currentLesson.brokenProdTask.fixHint}</p>
-              </div>
-            </div>
-          )}
+                  {/* Editor or Schema Content */}
+                  <div className="flex-1 overflow-hidden relative">
+                    {rightPanelTab === 'code' ? (
+                      <DynamicMonaco
+                        value={code}
+                        onChange={handleCodeChange}
+                        language={currentModule.engineType}
+                        onRunCode={handleRunCode}
+                      />
+                    ) : (
+                      <SchemaPreviewViewer schemas={currentLesson.schemaPreview} />
+                    )}
+                  </div>
+                </Panel>
+
+                {/* Horizontal Resizable Separator */}
+                <Separator className="h-1.5 bg-[#21262D] hover:bg-emerald-500/50 transition-colors cursor-row-resize flex items-center justify-center">
+                  <div className="w-8 h-0.5 bg-[#7D8590] rounded-full" />
+                </Separator>
+
+                {/* Bottom Console Panel (~40% default) */}
+                <Panel defaultSize="40%" minSize="20%" className="overflow-hidden flex flex-col">
+                  <OutputConsole
+                    response={workerResponse}
+                    isRunning={isRunning}
+                    onRunCode={handleRunCode}
+                    onVerifyCode={handleVerifyCode}
+                    testConfig={currentLesson.testConfig}
+                  />
+                </Panel>
+              </Group>
+            </Panel>
+          </Group>
+        )}
+      </div>
+
+      {/* Confirmation Modal for Solution Reveal */}
+      <SolutionConfirmModal
+        isOpen={isSolutionModalOpen}
+        onClose={() => setIsSolutionModalOpen(false)}
+        onConfirmReveal={() => setRevealedSolution(true)}
+        onInsertCode={(sol) => setCode(sol)}
+        solutionCode={currentLesson.solutionCode}
+      />
+
+      {/* Bug Report Modal */}
+      <BugReportModal
+        isOpen={isBugModalOpen}
+        onClose={() => setIsBugModalOpen(false)}
+        lessonId={currentLesson.id}
+        lessonTitle={currentLesson.title}
+        currentCode={code}
+      />
+    </div>
+  );
+}
+
+// Subcomponent: Editor Top Header Bar with Tabs, Autosave, Broken Prod mode
+function EditorHeader({
+  rightPanelTab,
+  onSetRightPanelTab,
+  isBrokenProdMode,
+  onToggleBrokenProd,
+  saveStatus,
+  onResetCode,
+  brokenIncident,
+}: {
+  rightPanelTab: 'code' | 'schema';
+  onSetRightPanelTab: (t: 'code' | 'schema') => void;
+  isBrokenProdMode: boolean;
+  onToggleBrokenProd: () => void;
+  saveStatus: 'saved' | 'saving';
+  onResetCode: () => void;
+  brokenIncident: string;
+}) {
+  return (
+    <div className="flex flex-col shrink-0">
+      <div className="h-12 px-4 border-b border-[#21262D] bg-[#090C10] flex items-center justify-between select-none">
+        {/* Left Tabs */}
+        <div className="flex items-center gap-1.5">
+          <button
+            onClick={() => onSetRightPanelTab('code')}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-mono font-medium transition-colors ${
+              rightPanelTab === 'code'
+                ? 'bg-[#151B23] text-emerald-400 border border-emerald-500/30'
+                : 'text-[#7D8590] hover:text-[#E6EDF3]'
+            }`}
+          >
+            <FileCode className="w-3.5 h-3.5" />
+            <span>[💻 Код решения]</span>
+          </button>
+
+          <button
+            onClick={() => onSetRightPanelTab('schema')}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-mono font-medium transition-colors ${
+              rightPanelTab === 'schema'
+                ? 'bg-[#151B23] text-emerald-400 border border-emerald-500/30'
+                : 'text-[#7D8590] hover:text-[#E6EDF3]'
+            }`}
+          >
+            <Database className="w-3.5 h-3.5" />
+            <span>[📊 Схема данных]</span>
+          </button>
         </div>
 
-        {/* Right Side: Code Editor Workspace */}
-        <div className="w-[45%] flex flex-col bg-[#090C10] overflow-hidden">
-          <div className="h-11 px-4 border-b border-[#21262D] bg-[#090C10] flex items-center justify-between shrink-0 text-xs font-mono text-[#7D8590]">
-            <div className="flex items-center gap-2">
-              <FileCode className="w-4 h-4 text-emerald-400" />
-              <span>solution.{currentModule.engineType === 'python' ? 'py' : 'sql'}</span>
+        {/* Right Controls: Broken Prod, Autosave, Reset */}
+        <div className="flex items-center gap-2">
+          {/* Autosave status indicator */}
+          <span className="text-[11px] font-mono text-[#7D8590] hidden sm:inline-flex items-center gap-1">
+            {saveStatus === 'saving' ? (
+              <>
+                <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+                <span>Сохранение...</span>
+              </>
+            ) : (
+              <>
+                <Check className="w-3.5 h-3.5 text-emerald-400" />
+                <span className="text-emerald-400/90">Черновик сохранен</span>
+              </>
+            )}
+          </span>
+
+          {/* Reset Code Button */}
+          <button
+            onClick={onResetCode}
+            className="w-7 h-7 rounded-lg flex items-center justify-center bg-[#151B23] border border-[#21262D] hover:bg-[#21262D] text-[#7D8590] hover:text-[#E6EDF3] transition-colors"
+            title="Сбросить код к начальному шаблону"
+          >
+            <RotateCcw className="w-3.5 h-3.5" />
+          </button>
+
+          {/* 🔥 Сломанный прод Button */}
+          <button
+            onClick={onToggleBrokenProd}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-mono font-bold transition-all cursor-pointer ${
+              isBrokenProdMode
+                ? 'bg-red-500 text-white shadow-[0_0_15px_rgba(239,68,68,0.4)] animate-pulse'
+                : 'bg-red-950/30 border border-red-500/40 text-red-400 hover:bg-red-950/60'
+            }`}
+            title="Режим симулятора аварии в продакшене"
+          >
+            <Flame className="w-3.5 h-3.5 fill-current" />
+            <span>Сломанный прод</span>
+          </button>
+        </div>
+      </div>
+
+      {/* Red Alert Banner when Broken Prod mode is active */}
+      {isBrokenProdMode && (
+        <div className="bg-red-950/40 border-b border-red-500/40 px-4 py-2.5 flex items-center justify-between text-xs text-red-200">
+          <div className="flex items-center gap-2">
+            <Flame className="w-4 h-4 text-red-400 fill-current shrink-0" />
+            <div>
+              <span className="font-bold text-red-400 mr-1.5">АВАРИЯ В ПРОДЕ:</span>
+              <span>{brokenIncident}</span>
             </div>
-            <span className="text-[10px] text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded">
-              {currentModule.engineType.toUpperCase()} Engine
-            </span>
           </div>
+          <span className="text-[10px] font-mono text-red-400 bg-red-900/40 px-2 py-0.5 rounded border border-red-500/30 shrink-0 ml-2">
+            Изолированный черновик
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
 
-          {/* Editor Area (Code View) */}
-          <div className="flex-1 p-4 bg-[#0D1117] overflow-y-auto font-mono text-xs text-[#E6EDF3]">
-            <div className="bg-[#151B23] border border-[#21262D] rounded-xl p-4 text-xs font-mono leading-relaxed space-y-2">
-              <span className="text-[#7D8590]">{'// Шаблон решения задачи:'}</span>
-              <pre className="text-emerald-400 whitespace-pre-wrap">{currentLesson.initialCode}</pre>
+// Subcomponent: Theory & Visuals Content Container
+function TheoryContent({
+  currentLesson,
+  currentModule,
+  revealedHint1,
+  revealedHint2,
+  revealedSolution,
+  onRevealHint1,
+  onRevealHint2,
+  onOpenSolutionModal,
+  onOpenBugReport,
+}: {
+  currentLesson: ReturnType<typeof getLesson>;
+  currentModule: ReturnType<typeof getModuleBySlug>;
+  revealedHint1: boolean;
+  revealedHint2: boolean;
+  revealedSolution: boolean;
+  onRevealHint1: () => void;
+  onRevealHint2: () => void;
+  onOpenSolutionModal: () => void;
+  onOpenBugReport: () => void;
+}) {
+  if (!currentLesson || !currentModule) return null;
+
+  return (
+    <div className="space-y-8">
+      {/* Title & Metadata */}
+      <div>
+        <div className="flex items-center gap-2 text-xs font-mono text-emerald-400 mb-2">
+          <span>{currentModule.title}</span>
+          <span>•</span>
+          <span>Урок {currentLesson.order}</span>
+          <span>•</span>
+          <span>{currentLesson.estimatedMinutes} мин чтения</span>
+        </div>
+        <h1 className="text-2xl font-bold text-[#E6EDF3] leading-snug">
+          {currentLesson.title}
+        </h1>
+      </div>
+
+      {/* Theory Blocks */}
+      {currentLesson.theoryBlocks.map((block, idx) => {
+        if (block.type === 'markdown') {
+          return (
+            <div key={idx} className="text-sm text-[#E6EDF3] leading-relaxed">
+              <GlossaryText content={block.content} terms={currentLesson.glossaryTerms} />
             </div>
+          );
+        }
 
-            <div className="mt-4 bg-[#151B23] border border-[#21262D] rounded-xl p-4 text-xs font-mono leading-relaxed space-y-2">
-              <span className="text-[#7D8590]">{'// Эталонное решение (проверка Web Worker в Этапе 2):'}</span>
-              <pre className="text-sky-300 whitespace-pre-wrap">{currentLesson.solutionCode}</pre>
+        if (block.type === 'callout') {
+          return (
+            <CalloutBlock
+              key={idx}
+              variant={block.variant}
+              title={block.title}
+              content={block.content}
+            />
+          );
+        }
+
+        if (block.type === 'er-diagram') {
+          return <ERDiagram key={idx} data={block.data} />;
+        }
+
+        if (block.type === 'data-flow') {
+          return <DataFlowPipeline key={idx} data={block.data} />;
+        }
+
+        if (block.type === 'before-after-table') {
+          return <BeforeAfterTable key={idx} data={block.data} />;
+        }
+
+        return null;
+      })}
+
+      {/* Task Description Block */}
+      <div className="bg-[#151B23] border border-[#21262D] rounded-xl p-6 space-y-4 shadow-sm">
+        <h3 className="text-sm font-bold uppercase tracking-wider text-emerald-400 flex items-center gap-2">
+          <span>🎯</span> Практическое задание
+        </h3>
+        <p className="text-sm text-[#E6EDF3] leading-relaxed whitespace-pre-wrap font-sans">
+          {currentLesson.taskDescription}
+        </p>
+      </div>
+
+      {/* 3-Level Spoilers */}
+      <div className="space-y-3 pt-2">
+        <h4 className="text-xs font-bold uppercase tracking-wider text-[#7D8590]">
+          Подсказки к заданию (Спойлеры)
+        </h4>
+
+        {/* Spoiler 1 */}
+        <div className="bg-[#151B23] border border-[#21262D] rounded-xl p-4 transition-all">
+          {revealedHint1 ? (
+            <div className="space-y-1.5 animate-in fade-in duration-150">
+              <span className="text-xs font-bold text-emerald-400 block">
+                💡 Подсказка 1: Идея и алгоритм решения
+              </span>
+              <p className="text-xs text-[#E6EDF3] leading-relaxed">
+                {currentLesson.hints[0]}
+              </p>
             </div>
-          </div>
-
-          {/* Bottom Execution Bar */}
-          <div className="h-14 px-4 border-t border-[#21262D] bg-[#090C10] flex items-center justify-between shrink-0">
-            <span className="text-xs text-[#7D8590] font-mono">Таймаут: 5000 ms</span>
+          ) : (
             <button
-              onClick={handleComplete}
-              className="px-4 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-600 text-black text-xs font-bold transition-colors shadow-lg shadow-emerald-500/10 flex items-center gap-2 cursor-pointer"
+              onClick={onRevealHint1}
+              className="w-full text-left flex items-center justify-between text-xs font-medium text-[#7D8590] hover:text-[#E6EDF3] transition-colors cursor-pointer"
             >
-              <CheckCircle2 className="w-4 h-4" />
-              <span>Проверить решение</span>
+              <span>💡 Подсказка 1: Идея и алгоритм решения</span>
+              <Eye className="w-4 h-4 text-[#7D8590]" />
             </button>
-          </div>
+          )}
         </div>
+
+        {/* Spoiler 2 */}
+        <div className="bg-[#151B23] border border-[#21262D] rounded-xl p-4 transition-all">
+          {revealedHint2 ? (
+            <div className="space-y-1.5 animate-in fade-in duration-150">
+              <span className="text-xs font-bold text-sky-400 block">
+                🛠 Подсказка 2: Синтаксис и нужные конструкции
+              </span>
+              <p className="text-xs text-[#E6EDF3] leading-relaxed">
+                {currentLesson.hints[1]}
+              </p>
+            </div>
+          ) : (
+            <button
+              onClick={onRevealHint2}
+              className="w-full text-left flex items-center justify-between text-xs font-medium text-[#7D8590] hover:text-[#E6EDF3] transition-colors cursor-pointer"
+            >
+              <span>🛠 Подсказка 2: Синтаксис и нужные конструкции</span>
+              <Eye className="w-4 h-4 text-[#7D8590]" />
+            </button>
+          )}
+        </div>
+
+        {/* Spoiler 3: Solution */}
+        <div className="bg-[#151B23] border border-[#21262D] rounded-xl p-4 transition-all">
+          {revealedSolution ? (
+            <div className="space-y-2 animate-in fade-in duration-150">
+              <span className="text-xs font-bold text-purple-400 block">
+                👁 Эталонное решение:
+              </span>
+              <p className="text-xs text-[#7D8590] leading-relaxed mb-2">
+                {currentLesson.hints[2]}
+              </p>
+              <pre className="p-3 bg-[#090C10] border border-[#21262D] rounded-lg font-mono text-xs text-emerald-300 overflow-x-auto whitespace-pre-wrap">
+                {currentLesson.solutionCode}
+              </pre>
+            </div>
+          ) : (
+            <button
+              onClick={onOpenSolutionModal}
+              className="w-full text-left flex items-center justify-between text-xs font-medium text-amber-400/90 hover:text-amber-300 transition-colors cursor-pointer"
+            >
+              <span>👁 Показать эталонное решение</span>
+              <Eye className="w-4 h-4 text-amber-400" />
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Bottom Bug Report Link */}
+      <div className="pt-6 border-t border-[#21262D] flex items-center justify-between text-xs text-[#7D8590]">
+        <button
+          onClick={onOpenBugReport}
+          className="flex items-center gap-1.5 text-[#7D8590] hover:text-amber-400 transition-colors cursor-pointer"
+        >
+          <Bug className="w-3.5 h-3.5" />
+          <span>🐞 Нашли неточность в уроке?</span>
+        </button>
+        <span className="font-mono text-[11px]">ID: {currentLesson.id}</span>
       </div>
     </div>
   );
