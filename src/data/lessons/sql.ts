@@ -1501,4 +1501,1003 @@ ORDER BY order_id ASC;`,
       'Примените оконную функцию ROW_NUMBER() OVER (PARTITION BY m.order_id ORDER BY m.updated_at DESC) AS rn и во внешнем запросе отфильтруйте WHERE rn = 1.',
     ],
   },
+  {
+    id: 'sql-7',
+    moduleSlug: 'sql',
+    order: 7,
+    title: 'Оконные фреймы под капотом: ROWS против RANGE, ловушка Peers и расчет скользящих метрик',
+    estimatedMinutes: 35,
+    glossaryTerms: [
+      { term: 'Window Frame', definition: 'Оконный фрейм — границы подмножества строк внутри партиции, по которым агрегатная функция производит вычисление для текущей строки.' },
+      { term: 'Peers', definition: 'Строки-дубликаты внутри партиции, имеющие идентичные значения в колонках сортировки ORDER BY.' },
+      { term: 'Sliding Window', definition: 'Скользящее окно — динамический фрейм с фиксированной физической длиной (например, текущая строка и 2 предыдущие), скользящий вдоль временного ряда.' },
+      { term: 'EXCLUDE Clause', definition: 'Конструкция стандарта SQL:2011, позволяющая исключать текущую строку (EXCLUDE CURRENT ROW) или группу дубликатов (EXCLUDE GROUP) из расчета фрейма.' },
+      { term: 'Ring Buffer', definition: 'Кольцевой буфер — структура данных в памяти СУБД, используемая для сверхбыстрого вычисления скользящих средних по фрейму ROWS за O(1).' },
+    ],
+    schemaPreview: [
+      {
+        tableName: 'stock_trades',
+        description: 'Журнал биржевых сделок по ценным бумагам',
+        columns: [
+          { name: 'trade_id', type: 'INT', keyType: 'PK' },
+          { name: 'ticker', type: 'VARCHAR(10)' },
+          { name: 'trade_date', type: 'DATE' },
+          { name: 'price', type: 'NUMERIC(10,2)' },
+          { name: 'shares', type: 'INT' },
+        ],
+        sampleRows: [
+          { trade_id: 1, ticker: 'SBER', trade_date: '2026-10-01', price: 250.00, shares: 100 },
+          { trade_id: 2, ticker: 'SBER', trade_date: '2026-10-02', price: 255.00, shares: 150 },
+          { trade_id: 3, ticker: 'SBER', trade_date: '2026-10-02', price: 260.00, shares: 200 },
+          { trade_id: 4, ticker: 'SBER', trade_date: '2026-10-03', price: 258.00, shares: 120 },
+          { trade_id: 5, ticker: 'GAZP', trade_date: '2026-10-01', price: 130.00, shares: 300 },
+        ],
+      },
+    ],
+    theoryBlocks: [
+      {
+        type: 'markdown',
+        content: `### Физика оконных фреймов: как движок СУБД перемещает курсор
+
+Когда реляционная СУБД выполняет оконную функцию с секцией \`OVER (PARTITION BY ... ORDER BY ...)\`, оптимизатор строит физический план с оператором **\`WindowAgg\`** (или \`StreamingWindow\`).
+
+Вычисление агрегата опирается на понятие **фрейма (Window Frame)** — подвижной рамки видимости строк:
+\`\`\`sql
+FUNCTION() OVER (
+    PARTITION BY ticker 
+    ORDER BY trade_date 
+    [ROWS | RANGE] BETWEEN <frame_start> AND <frame_end>
+)
+\`\`\`
+
+#### Принципиальная разница между ROWS и RANGE
+1. **\`ROWS BETWEEN\` (Физические строки):**
+   Оперирует строгим смещением по физическим строкам:
+   * \`ROWS BETWEEN 2 PRECEDING AND CURRENT ROW\` означает: взять ровно 2 предшествующие физические записи в таблице и текущую строку (всего до 3 строк).
+   * Вычисляется через высокопроизводительный **кольцевой буфер (Ring Buffer)** в оперативной памяти: при сдвиге курсора на одну позицию из суммы вычитается ушедшая строка и прибавляется новая за **$O(1)$** тактов CPU!
+
+2. **\`RANGE BETWEEN\` (Логический диапазон значений):**
+   Оперирует не физическими строками, а **значениями** в колонке \`ORDER BY\`.
+   Если в таблице есть несколько строк с одинаковым значением (например, две сделки по акции SBER произошли в одну дату \`2026-10-02\`), СУБД считает эти строки **пирами (Peers)**.
+   * \`RANGE\` обязан включить в расчет ВСЕ строки с совпадающим значением одновременно!
+
+#### Смертоносная ловушка дефолтного фрейма
+По стандарту ANSI SQL, если разработчик указал секцию \`ORDER BY\`, но не написал спецификацию фрейма:
+\`\`\`sql
+-- Кажется безобидным:
+SUM(shares) OVER (PARTITION BY ticker ORDER BY trade_date)
+\`\`\`
+СУБД **неявно и принудительно** подставляет стандартный фрейм:
+\`\`\`sql
+RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+\`\`\`
+
+**Последствия для продакшена:**
+1. **Искажение цифр в аналитике:** Обе строки за \`2026-10-02\` получат одинаковую кумулятивную сумму, равную сумме на конец всего дня, вместо последовательного нарастания!
+2. **Падение скорости в 10–50 раз:** Движок не может применить кольцевой буфер. Он вынужден на каждой строке сканировать вперед, чтобы проверить, нет ли впереди строк с таким же значением даты, материализуя группы в памяти.
+
+#### Спецификаторы исключений EXCLUDE (SQL:2011)
+В современных СУБД поддерживаются тонкие модификаторы исключений из фрейма:
+* \`EXCLUDE CURRENT ROW\`: исключает саму текущую строку (удобно для расчета среднего по "соседям").
+* \`EXCLUDE GROUP\`: исключает текущую строку и всех ее логических дубликатов (peers).
+* \`EXCLUDE TIES\`: оставляет саму текущую строку, но исключает ее дубликаты.`,
+      },
+      {
+        type: 'callout',
+        variant: 'analogy',
+        title: '💡 На пальцах: Очередь за кофе и однофамильцы',
+        content: `Представьте очередь в кофейне:
+- **\`ROWS BETWEEN 1 PRECEDING AND CURRENT ROW\`**: Бариста смотрит на вас и на человека, стоящего ровно перед вами физически в очереди. Всегда ровно 2 человека, даже если он пришел на секунду раньше.
+- **\`RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW\`**: Бариста смотрит на время чека. Если вы и еще 3 человека подошли к кассе в 10:00:00, бариста посчитает заказы всех четверых одновременно и назовет вам четверым одну общую сумму!`,
+      },
+      {
+        type: 'before-after-table',
+        data: {
+          title: 'Сравнение поведения фреймов ROWS и RANGE при наличии одинаковых дат (Peers)',
+          beforeDescription: 'Сделки по акции SBER (две сделки совершены в одну дату: 2026-10-02)',
+          beforeColumns: ['trade_id', 'trade_date', 'shares'],
+          beforeRows: [
+            [1, '2026-10-01', 100],
+            [2, '2026-10-02', 150],
+            [3, '2026-10-02', 200],
+            [4, '2026-10-03', 120],
+          ],
+          afterDescription: 'Результат: ROWS нарастает строго физически; дефолтный RANGE задваивает сумму на одинаковых датах!',
+          afterColumns: ['trade_id', 'trade_date', 'shares', 'ROWS_total', 'RANGE_total (дефолт)'],
+          afterRows: [
+            [1, '2026-10-01', 100, 100, 100],
+            [2, '2026-10-02', 150, 250, 450],
+            [3, '2026-10-02', 200, 450, 450],
+            [4, '2026-10-03', 120, 570, 570],
+          ],
+          highlightDiffIndices: [
+            { row: 1, col: 4 },
+          ],
+        },
+      },
+      {
+        type: 'callout',
+        variant: 'prod-danger',
+        title: '⚠️ Грабли в проде: Искажение тикового объема сделок из-за неявного RANGE фрейма',
+        content: `В высокочастотной алготрейдинговой платформе аналитики рассчитывали 10-секундный скользящий объем сделок через \`SUM(volume) OVER (ORDER BY trade_ts)\`. 
+Так как на ликвидных инструментах в одну миллисекунду происходят десятки сделок, дефолтный \`RANGE\` объединял их в группы, из-за чего алго-робот получил ложный сигнал о гигантском моментальном скачке объема и преждевременно закрыл прибыльные позиции.
+
+**Правило:** Если в секции \`ORDER BY\` возможны повторяющиеся значения, ВСЕГДА явно пишите \`ROWS BETWEEN ...\`!`,
+      },
+      {
+        type: 'callout',
+        variant: 'interview',
+        title: '🎯 Спросят на собесе: Какой оконный фрейм подставляется СУБД по умолчанию при наличии ORDER BY и чем это опасно?',
+        content: `**Ответ:** 
+При наличии \`ORDER BY\` стандартом ANSI SQL подставляется:
+\`RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW\`.
+Опасности:
+1. **Логическая:** Если поле сортировки содержит дубликаты (peers), функция припишет одинаковый агрегат всем строкам с совпадающим ключом, исказив плавность нарастающего итога.
+2. **Производительность:** Движок вынужден проверять последующие строки на равенство ключа, что отключает оптимизацию через потоковый кольцевой буфер и замедляет выполнение в разы на миллионах строк.`,
+      },
+    ],
+    taskDescription: `Для таблицы биржевых сделок 'stock_trades' рассчитайте скользящие и кумулятивные показатели по каждой ценной бумаге ('ticker'):
+1. 'ticker': тикер ценной бумаги.
+2. 'trade_date': дата совершения сделки.
+3. 'price': цена сделки.
+4. 'moving_avg_3_trades': 3-строчное скользящее среднее цены сделки (текущая сделка и ровно 2 предшествующие физические сделки по данному тикеру: 'ROWS BETWEEN 2 PRECEDING AND CURRENT ROW'), округленное до 2 знаков после запятой через 'ROUND(..., 2)'.
+5. 'running_total_shares': нарастающий итог объема купленных акций ('shares') от начала торгов по бумаге до текущей физической строки ('ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW').
+Отсортируйте результат: по 'ticker' по возрастанию, затем по 'trade_date' по возрастанию, затем по 'trade_id' по возрастанию.`,
+    seedCode: `CREATE TABLE stock_trades (
+    trade_id INT PRIMARY KEY,
+    ticker VARCHAR(10),
+    trade_date DATE,
+    price NUMERIC(10,2),
+    shares INT
+);
+
+INSERT INTO stock_trades VALUES
+(1, 'SBER', '2026-10-01', 250.00, 100),
+(2, 'SBER', '2026-10-02', 255.00, 150),
+(3, 'SBER', '2026-10-02', 260.00, 200),
+(4, 'SBER', '2026-10-03', 258.00, 120),
+(5, 'GAZP', '2026-10-01', 130.00, 300),
+(6, 'GAZP', '2026-10-02', 135.00, 250);`,
+    initialCode: `-- Рассчитайте скользящее среднее и нарастающий объем по фрейму ROWS
+SELECT 
+    ticker,
+    trade_date,
+    price,
+    -- moving_avg_3_trades: AVG(price) OVER (...) с фреймом ROWS
+    -- running_total_shares: SUM(shares) OVER (...) с фреймом ROWS
+FROM stock_trades
+ORDER BY ticker ASC, trade_date ASC, trade_id ASC;`,
+    solutionCode: `SELECT 
+    ticker,
+    trade_date,
+    price,
+    ROUND(AVG(price) OVER (
+        PARTITION BY ticker 
+        ORDER BY trade_date, trade_id
+        ROWS BETWEEN 2 PRECEDING AND CURRENT ROW
+    ), 2) AS moving_avg_3_trades,
+    SUM(shares) OVER (
+        PARTITION BY ticker 
+        ORDER BY trade_date, trade_id
+        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    ) AS running_total_shares
+FROM stock_trades
+ORDER BY ticker ASC, trade_date ASC, trade_id ASC;`,
+    testConfig: {
+      checkOrder: true,
+      floatPrecision: 2,
+      expectedRowCount: 6,
+      expectedColumns: ['ticker', 'trade_date', 'price', 'moving_avg_3_trades', 'running_total_shares'],
+    },
+    brokenProdTask: {
+      title: 'Инцидент #112: Искажение скользящей средней цены из-за дефолтного RANGE',
+      incidentDescription: 'Младший аналитик рассчитал скользящую среднюю без указания ROWS фрейма, из-за чего строки с одинаковой датой сделки объединились в одну группу и выдали ложные значения цен.',
+      buggyCode: `SELECT 
+    ticker,
+    trade_date,
+    price,
+    ROUND(AVG(price) OVER (
+        PARTITION BY ticker 
+        ORDER BY trade_date
+        RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    ), 2) AS moving_avg_3_trades,
+    SUM(shares) OVER (
+        PARTITION BY ticker 
+        ORDER BY trade_date
+        RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    ) AS running_total_shares
+FROM stock_trades
+ORDER BY ticker ASC, trade_date ASC, trade_id ASC;`,
+      fixHint: 'Замените логический фрейм RANGE на физический ROWS BETWEEN 2 PRECEDING AND CURRENT ROW и ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW.',
+      solutionCode: `SELECT 
+    ticker,
+    trade_date,
+    price,
+    ROUND(AVG(price) OVER (
+        PARTITION BY ticker 
+        ORDER BY trade_date, trade_id
+        ROWS BETWEEN 2 PRECEDING AND CURRENT ROW
+    ), 2) AS moving_avg_3_trades,
+    SUM(shares) OVER (
+        PARTITION BY ticker 
+        ORDER BY trade_date, trade_id
+        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    ) AS running_total_shares
+FROM stock_trades
+ORDER BY ticker ASC, trade_date ASC, trade_id ASC;`,
+      testConfig: {
+        checkOrder: true,
+        floatPrecision: 2,
+      },
+    },
+    hints: [
+      'Для расчета скользящего среднего используйте фрейм ROWS BETWEEN 2 PRECEDING AND CURRENT ROW внутри OVER (PARTITION BY ticker ORDER BY trade_date, trade_id).',
+      'Для нарастающего объема используйте фрейм ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW.',
+      'Округлите среднюю цену с помощью ROUND(..., 2).',
+    ],
+  },
+  {
+    id: 'sql-8',
+    moduleSlug: 'sql',
+    order: 8,
+    title: 'Временные смещения и сессионизация: LAG, LEAD, FIRST_VALUE и смертельная ловушка LAST_VALUE',
+    estimatedMinutes: 40,
+    glossaryTerms: [
+      { term: 'Navigation Functions', definition: 'Навигационные функции (LAG, LEAD, FIRST_VALUE, LAST_VALUE) — семейство оконных функций для перемещения по строкам вперед и назад без соединения таблицы с самой собой.' },
+      { term: 'LAST_VALUE Trap', definition: 'Классическая ошибка SQL: вызов LAST_VALUE() без явного фрейма возвращает значение текущей строки из-за дефолтного ограничения CURRENT ROW.' },
+      { term: 'Sessionization', definition: 'Сессионизация — процесс объединения дискретных логов кликов или событий в непрерывные пользовательские сессии по порогу времени неактивности.' },
+      { term: 'Lookahead Window', definition: 'Окно заглядывания вперед (UNBOUNDED FOLLOWING), позволяющее алгоритму считывать будущее состояние процесса из любой промежуточной строки.' },
+      { term: 'Inactivity Threshold', definition: 'Порог неактивности (обычно 30 минут в веб-аналитике Google Analytics / Яндекс Метрика), превышение которого разделяет одну сессию на две разные.' },
+    ],
+    schemaPreview: [
+      {
+        tableName: 'web_clickstream',
+        description: 'Сырые логи кликов пользователей в интернет-магазине',
+        columns: [
+          { name: 'event_id', type: 'INT', keyType: 'PK' },
+          { name: 'session_id', type: 'INT', keyType: 'FK' },
+          { name: 'event_time', type: 'TIMESTAMP' },
+          { name: 'page_url', type: 'VARCHAR(100)' },
+          { name: 'status', type: 'VARCHAR(20)' },
+        ],
+        sampleRows: [
+          { event_id: 1, session_id: 1001, event_time: '2026-10-10 14:00:00', page_url: '/home', status: 'view' },
+          { event_id: 2, session_id: 1001, event_time: '2026-10-10 14:02:30', page_url: '/catalog', status: 'view' },
+          { event_id: 3, session_id: 1001, event_time: '2026-10-10 14:05:00', page_url: '/cart', status: 'checkout' },
+          { event_id: 4, session_id: 1001, event_time: '2026-10-10 14:08:15', page_url: '/success', status: 'purchased' },
+          { event_id: 5, session_id: 1002, event_time: '2026-10-10 15:00:00', page_url: '/home', status: 'view' },
+        ],
+      },
+    ],
+    theoryBlocks: [
+      {
+        type: 'markdown',
+        content: `### Анатомия навигационных функций: как заглянуть в прошлое и будущее
+
+В аналитических витринах данных постоянной задачей является отслеживание цепочек взаимодействий: откуда пришел пользователь, сколько секунд он провел на странице, и завершилась ли сессия успешной конверсией.
+
+Для этого стандарт SQL предоставляет четыре функции:
+1. **\`LAG(column, offset, default_value)\`:** Считывает значение из предшествующей строки со смещением \`offset\` (по умолчанию 1). Если предыдущей строки нет (начало партиции), возвращает \`default_value\`.
+2. **\`LEAD(column, offset, default_value)\`:** Считывает значение из последующей строки (заглядывание в будущее).
+3. **\`FIRST_VALUE(column)\`:** Возвращает значение первой строки текущего фрейма.
+4. **\`LAST_VALUE(column)\`:** Возвращает значение последней строки текущего фрейма.
+
+#### Смертоносная ловушка функции LAST_VALUE()
+Самый частый вопрос на технических собеседованиях для выявления "ненастоящих сеньоров":
+*«Почему запрос \`LAST_VALUE(status) OVER (PARTITION BY session_id ORDER BY event_time)\` возвращает текущий статус строки, а не финальный статус сессии?»*
+
+**Глубокое объяснение физики реляционного движка:**
+По стандарту ANSI SQL при наличии секции \`ORDER BY\` дефолтным фреймом всегда является:
+\`\`\`sql
+RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+\`\`\`
+Посмотрите на конец этого диапазона: он заканчивается на **\`CURRENT ROW\`**!
+Когда курсор находится на 2-й строке сессии (просмотр каталога), движок СУБД строит фрейм от первой строки до **текущей**. 
+Для движка физически не существует строк впереди! Какая строка является "последней" в окне, которое заканчивается на текущей строке? Разумеется, **сама текущая строка**!
+
+В итоге на шаге 1 \`LAST_VALUE\` вернет \`view\`, на шаге 2 — \`view\`, на шаге 3 — \`checkout\`, на шаге 4 — \`purchased\`. Вместо одного постоянного финального статуса сессии вы получаете бессмысленную копию текущего значения!
+
+#### Лекарство: Расширение фрейма до конца партиции
+Чтобы \`LAST_VALUE\` сработал корректно и увидел будущее состояние сессии, необходимо явно указать окну расшириться до конца партиции:
+\`\`\`sql
+LAST_VALUE(status) OVER (
+    PARTITION BY session_id 
+    ORDER BY event_time
+    ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+)
+\`\`\`
+С конструкцией **\`UNBOUNDED FOLLOWING\`** окно охватывает партицию целиком от самого первого до самого последнего события, и \`LAST_VALUE\` на каждой строке возвращает истинный финальный статус (\`purchased\`).`,
+      },
+      {
+        type: 'callout',
+        variant: 'analogy',
+        title: '💡 На пальцах: Чтение детектива с закладкой',
+        content: `Представьте, что вы читаете детектив и остановились на 50-й странице (\`CURRENT ROW\`). 
+Если вас спросят: «Кто убийца в последней прочитанной главе?», вы назовете события 50-й страницы. 
+Если вы хотите знать, чем закончится вся книга целиком, вы обязаны открыть эпилог на самой последней странице (\`UNBOUNDED FOLLOWING\`). Дефолтный фрейм SQL не позволяет заглянуть дальше вашей закладки.`,
+      },
+      {
+        type: 'data-flow',
+        data: {
+          title: 'Границы видимости фрейма: дефолтная ловушка против явного UNBOUNDED FOLLOWING',
+          nodes: [
+            { id: 'start', label: 'UNBOUNDED PRECEDING', sublabel: 'Начало сессии (/home)', type: 'source', status: 'success' },
+            { id: 'current', label: 'CURRENT ROW', sublabel: 'Текущий клик (/cart)', type: 'transform', status: 'warning' },
+            { id: 'end', label: 'UNBOUNDED FOLLOWING', sublabel: 'Финальный клик (/success)', type: 'storage', status: 'success' },
+          ],
+          edges: [
+            { from: 'start', to: 'current', label: 'Дефолтный фрейм обрывается здесь!', animated: false },
+            { from: 'current', to: 'end', label: 'Требуется явный ROWS ... UNBOUNDED FOLLOWING', animated: true },
+          ],
+        },
+      },
+      {
+        type: 'callout',
+        variant: 'prod-danger',
+        title: '⚠️ Грабли в проде: Нулевой LTV и ошибочный статус оттока из-за LAST_VALUE без UNBOUNDED FOLLOWING',
+        content: `В продуктовой аналитике онлайн-кинотеатра маркетологи строили когортный анализ: для каждого действия пользователя определяли его финальный статус через год (\`active\` или \`churned\`). 
+Аналитик применил \`LAST_VALUE(status) OVER (PARTITION BY user_id ORDER BY event_time)\`. 
+Поскольку на ранних этапах пользователи имели статус \`trial\`, в витрину попали некорректные статусы, что занизило показатель удержания клиентов (Retention) на 60% и привело к необоснованному сокращению рекламных бюджетов.`,
+      },
+      {
+        type: 'callout',
+        variant: 'interview',
+        title: '🎯 Спросят на собесе: Почему функция LAST_VALUE() возвращает значение текущей строки и как это исправить?',
+        content: `**Ответ:** 
+По стандарту ANSI SQL при наличии секции \`ORDER BY\` дефолтным фреймом является \`RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW\`. 
+Поскольку верхняя граница окна зафиксирована на \`CURRENT ROW\`, текущая строка является последней строкой фрейма. 
+Для исправления необходимо явно специфицировать границы фрейма до конца партиции:
+\`ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING\` (либо использовать обратный \`FIRST_VALUE(col) OVER (ORDER BY ts DESC)\`).`,
+      },
+    ],
+    taskDescription: `Для таблицы сырых логов веб-кликов 'web_clickstream' обогатите каждое событие сессии аналитическим контекстом:
+1. 'session_id': идентификатор пользовательской сессии.
+2. 'event_time': точное время события.
+3. 'page_url': адрес посещенной страницы.
+4. 'status': статус текущего действия.
+5. 'prev_page': адрес предшествующей страницы в рамках данной сессии ('LAG'). Если текущая страница — первая в сессии, вывести строку 'START'.
+6. 'landing_page': первая страница входа в сессию ('FIRST_VALUE').
+7. 'final_session_status': итоговый статус завершения всей сессии ('LAST_VALUE' с явным расширением фрейма до конца партиции 'ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING').
+Отсортируйте результат по 'session_id' по возрастанию, затем по 'event_time' по возрастанию.`,
+    seedCode: `CREATE TABLE web_clickstream (
+    event_id INT PRIMARY KEY,
+    session_id INT,
+    event_time TEXT,
+    page_url TEXT,
+    status TEXT
+);
+
+INSERT INTO web_clickstream VALUES
+(1, 1001, '2026-10-10 14:00:00', '/home', 'view'),
+(2, 1001, '2026-10-10 14:02:30', '/catalog', 'view'),
+(3, 1001, '2026-10-10 14:05:00', '/cart', 'checkout'),
+(4, 1001, '2026-10-10 14:08:15', '/success', 'purchased'),
+(5, 1002, '2026-10-10 15:00:00', '/home', 'view'),
+(6, 1002, '2026-10-10 15:01:20', '/catalog', 'abandoned');`,
+    initialCode: `-- Напишите аналитический запрос с LAG, FIRST_VALUE и LAST_VALUE
+SELECT 
+    session_id,
+    event_time,
+    page_url,
+    status,
+    -- prev_page: LAG(..., 1, 'START')
+    -- landing_page: FIRST_VALUE(...)
+    -- final_session_status: LAST_VALUE(...) с фреймом UNBOUNDED FOLLOWING
+FROM web_clickstream
+ORDER BY session_id ASC, event_time ASC;`,
+    solutionCode: `SELECT 
+    session_id,
+    event_time,
+    page_url,
+    status,
+    LAG(page_url, 1, 'START') OVER (
+        PARTITION BY session_id 
+        ORDER BY event_time
+    ) AS prev_page,
+    FIRST_VALUE(page_url) OVER (
+        PARTITION BY session_id 
+        ORDER BY event_time
+        ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+    ) AS landing_page,
+    LAST_VALUE(status) OVER (
+        PARTITION BY session_id 
+        ORDER BY event_time
+        ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+    ) AS final_session_status
+FROM web_clickstream
+ORDER BY session_id ASC, event_time ASC;`,
+    testConfig: {
+      checkOrder: true,
+      floatPrecision: 2,
+      expectedRowCount: 6,
+      expectedColumns: ['session_id', 'event_time', 'page_url', 'status', 'prev_page', 'landing_page', 'final_session_status'],
+    },
+    brokenProdTask: {
+      title: 'Инцидент #113: Сбой атрибуции конверсий из-за дефолтного фрейма в LAST_VALUE',
+      incidentDescription: 'Младший дата-инженер вызвал LAST_VALUE(status) без указания границ фрейма, из-за чего на промежуточных кликах выводились промежуточные статусы вместо финального статуса сессии.',
+      buggyCode: `SELECT 
+    session_id,
+    event_time,
+    page_url,
+    status,
+    LAG(page_url, 1, 'START') OVER (
+        PARTITION BY session_id 
+        ORDER BY event_time
+    ) AS prev_page,
+    FIRST_VALUE(page_url) OVER (
+        PARTITION BY session_id 
+        ORDER BY event_time
+    ) AS landing_page,
+    LAST_VALUE(status) OVER (
+        PARTITION BY session_id 
+        ORDER BY event_time -- ❌ Ошибка: отсутствует ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+    ) AS final_session_status
+FROM web_clickstream
+ORDER BY session_id ASC, event_time ASC;`,
+      fixHint: 'Добавьте явную спецификацию фрейма: ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING.',
+      solutionCode: `SELECT 
+    session_id,
+    event_time,
+    page_url,
+    status,
+    LAG(page_url, 1, 'START') OVER (
+        PARTITION BY session_id 
+        ORDER BY event_time
+    ) AS prev_page,
+    FIRST_VALUE(page_url) OVER (
+        PARTITION BY session_id 
+        ORDER BY event_time
+        ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+    ) AS landing_page,
+    LAST_VALUE(status) OVER (
+        PARTITION BY session_id 
+        ORDER BY event_time
+        ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+    ) AS final_session_status
+FROM web_clickstream
+ORDER BY session_id ASC, event_time ASC;`,
+      testConfig: {
+        checkOrder: true,
+        floatPrecision: 2,
+      },
+    },
+    hints: [
+      'Для получения предыдущей страницы используйте функцию LAG(page_url, 1, "START") OVER (PARTITION BY session_id ORDER BY event_time).',
+      'Для первой страницы входа используйте FIRST_VALUE(page_url) OVER (PARTITION BY session_id ORDER BY event_time ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING).',
+      'Для финального статуса сессии критически важно указать фрейм ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING внутри OVER для функции LAST_VALUE(status).',
+    ],
+  },
+  {
+    id: 'sql-9',
+    moduleSlug: 'sql',
+    order: 9,
+    title: 'Многомерные агрегации для BI-витрин: GROUPING SETS, ROLLUP, функция GROUPING() и условный FILTER',
+    estimatedMinutes: 40,
+    glossaryTerms: [
+      { term: 'Multi-Dimensional Aggregation', definition: 'Многомерная агрегация — одновременный расчет метрик по нескольким иерархическим срезам данных за одно сканирование источника.' },
+      { term: 'ROLLUP', definition: 'Конструкция ANSI SQL для иерархической агрегации (Группа -> Подгруппа -> Подытог -> Гранд-итог), генерирующая N + 1 уровень срезов.' },
+      { term: 'CUBE', definition: 'Оператор построения полного многомерного куба, генерирующий все возможные комбинации измерений (2^N срезов).' },
+      { term: 'GROUPING() Function', definition: 'Специальная функция стандарта SQL, возвращающая 1, если колонка свернута в подытог на текущей строке, и 0, если значение взято из сырых данных.' },
+      { term: 'Conditional Aggregation', definition: 'Условная агрегация через синтаксис FILTER (WHERE ...) или CASE WHEN для расчета показателей по срезам без размножения строк.' },
+    ],
+    schemaPreview: [
+      {
+        tableName: 'sales_mart',
+        description: 'Региональная витрина продаж товаров',
+        columns: [
+          { name: 'sale_id', type: 'INT', keyType: 'PK' },
+          { name: 'region', type: 'VARCHAR(50)' },
+          { name: 'category', type: 'VARCHAR(50)' },
+          { name: 'amount', type: 'NUMERIC(10,2)' },
+        ],
+        sampleRows: [
+          { sale_id: 1, region: 'Север', category: 'Электроника', amount: 120000.00 },
+          { sale_id: 2, region: 'Север', category: 'Одежда', amount: 45000.00 },
+          { sale_id: 3, region: 'Север', category: 'Электроника', amount: 80000.00 },
+          { sale_id: 4, region: 'Юг', category: 'Электроника', amount: 95000.00 },
+          { sale_id: 5, region: 'Юг', category: 'Одежда', amount: 60000.00 },
+        ],
+      },
+    ],
+    theoryBlocks: [
+      {
+        type: 'markdown',
+        content: `### Архитектура многомерных отчетов: почему naive GROUP BY не подходит для BI
+
+При построении дашбордов для руководства в Tableau, Power BI, Apache Superset или Metabase аналитикам требуются отчеты, в которых одновременно присутствуют:
+1. Детальные строки (Продажи по конкретному региону и категории).
+2. Промежуточные подытоги (Итого по региону «Север»).
+3. Финальный гранд-итог (Общая выручка всей компании).
+
+Если решать эту задачу наивно через несколько раздельных SQL-запросов, СУБД будет вынуждена сканировать многогигабайтную таблицу фактов **трижды**, создавая тройную нагрузку на диск и CPU.
+
+#### Семейство операторов: GROUPING SETS, ROLLUP и CUBE
+Стандарт ANSI SQL предоставляет декларативные инструменты для объединения нескольких уровней группировки в рамках одного прохода:
+
+* **\`GROUPING SETS\`:** Позволяет вручную перечислить нужные комбинации измерений:
+  \`\`\`sql
+  GROUP BY GROUPING SETS (
+      (region, category), -- уровень 1: детали
+      (region),           -- уровень 2: подытог по региону
+      ()                  -- уровень 3: гранд-итог
+  )
+  \`\`\`
+
+* **\`ROLLUP(region, category)\`:** Автоматически разворачивает иерархию от самого детального уровня к общему итогу:
+  $(region, category) \\to (region) \\to ()$.
+  Для $N$ колонок генерирует ровно **$N + 1$** срез.
+
+* **\`CUBE(region, category)\`:** Генерирует полный комбинаторный куб со всеми возможными пересечениями:
+  $(region, category) \\to (region) \\to (category) \\to ()$.
+  Для $N$ колонок генерирует **$2^N$** срезов.
+
+#### Коварная ловушка NULL: как отличить подытог от реального значения
+Когда движок генерирует строку подытога (например, сумму по региону «Север» по всем категориям), в колонке \`category\` подставляется значение **\`NULL\`**.
+
+Но что произойдет, если в сырых данных у вас реально есть товары с не указанной категорией (\`category IS NULL\`)?
+В отчете появятся две разные строки со значением \`NULL\`:
+1. Реальные продажи товаров без категории в регионе «Север».
+2. Строка общего подытога по региону «Север»!
+
+**Решение — функция \`GROUPING(column)\`:**
+* Возвращает **\`0\`**, если значение колонки взято из исходных данных (даже если там реальный \`NULL\`).
+* Возвращает **\`1\`**, если значение сгенерировано реляционным движком как подытог (Subtotal/Grand Total)!
+\`\`\`sql
+SELECT 
+    CASE WHEN GROUPING(region) = 1 THEN '-- ГРАНД-ИТОГ --' ELSE region END AS region,
+    SUM(amount) AS total_revenue
+FROM sales_mart
+GROUP BY ROLLUP(region);
+\`\`\`
+
+#### Условная агрегация через FILTER (WHERE ...)
+Вместо громоздких конструкций \`SUM(CASE WHEN ...)\` современный стандарт SQL поддерживает чистый предикативный фильтр агрегатов:
+\`\`\`sql
+SELECT 
+    region,
+    COUNT(*) AS total_orders,
+    COUNT(*) FILTER (WHERE category = 'Электроника') AS electronics_orders,
+    COUNT(*) FILTER (WHERE category = 'Одежда') AS clothing_orders
+FROM sales_mart
+GROUP BY region;
+\`\`\``,
+      },
+      {
+        type: 'callout',
+        variant: 'analogy',
+        title: '💡 На пальцах: Чек из строительного гипермаркета',
+        content: `Представьте длинный кассовый чек из Леруа Мерлен:
+- Сначала идут отдельные товары (краска, кисть, гвозди) — это детальный уровень (\`DETAILED\`).
+- Затем черта и строка: «Итого отдел сантехники: 14 500 руб» — это подытог (\`ROLLUP\`).
+- В самом низу чека жирным шрифтом: «ВСЕГО К ОПЛАТЕ: 48 200 руб» — это гранд-итог (\`GRAND_TOTAL\`).`,
+      },
+      {
+        type: 'before-after-table',
+        data: {
+          title: 'Иерархическая структура многомерного отчета со срезами и итогами',
+          beforeDescription: 'Сырые транзакции по продажам в магазинах',
+          beforeColumns: ['region', 'category', 'amount'],
+          beforeRows: [
+            ['Север', 'Одежда', 45000],
+            ['Север', 'Электроника', 200000],
+            ['Юг', 'Одежда', 60000],
+            ['Юг', 'Электроника', 95000],
+          ],
+          afterDescription: 'Итоговая BI-витрина: детальные срезы, подытоги регионов и гранд-итог компании',
+          afterColumns: ['region', 'category', 'total_revenue', 'agg_level'],
+          afterRows: [
+            ['Север', 'Одежда', 45000, 'DETAILED'],
+            ['Север', 'Электроника', 200000, 'DETAILED'],
+            ['Юг', 'Одежда', 60000, 'DETAILED'],
+            ['Юг', 'Электроника', 95000, 'DETAILED'],
+            ['Север', '-- ВСЕ КАТЕГОРИИ --', 245000, 'SUBTOTAL_REGION'],
+            ['Юг', '-- ВСЕ КАТЕГОРИИ --', 155000, 'SUBTOTAL_REGION'],
+            ['-- ВСЕ РЕГИОНЫ --', '-- ГРАНД-ИТОГ --', 400000, 'GRAND_TOTAL'],
+          ],
+          highlightDiffIndices: [
+            { row: 4, col: 2 },
+            { row: 5, col: 2 },
+            { row: 6, col: 2 },
+          ],
+        },
+      },
+      {
+        type: 'callout',
+        variant: 'prod-danger',
+        title: '⚠️ Грабли в проде: Реальный NULL в регионе посчитался как гранд-итог компании, исказив KPI',
+        content: `В розничной сети маркетплейса при формировании финансового отчета с \`ROLLUP\` в таблицу заказов попали строки онлайн-заказов из мобильного приложения без физического региона (\`region IS NULL\`). 
+BI-система интерпретировала строку с пустым регионом как общий итог всей компании, перезаписав глобальную выручку сети значением одной маленькой когорты онлайн-покупок.
+
+**Правило:** При формировании сводных отчетов всегда заменяйте сгенерированные подытоги на явные строковые маркеры (например, \`-- ИТОГО --\`) и проверяйте признак группировки!`,
+      },
+      {
+        type: 'callout',
+        variant: 'interview',
+        title: '🎯 Спросят на собесе: Чем ROLLUP отличается от CUBE и сколько срезов агрегации генерирует каждый из них для N измерений?',
+        content: `**Ответ:** 
+- **\`ROLLUP\`** рассчитывает строго иерархическую агрегацию слева направо (например: Страна $\\to$ Область $\\to$ Город $\\to$ Итог). Для $N$ колонок генерируется ровно **$N + 1$** срез.
+- **\`CUBE\`** рассчитывает полный многомерный гиперкуб со всеми возможными сочетаниями колонок (включая неиерархические срезы, например: только Город без Страны). Для $N$ колонок генерируется **$2^N$** срезов. 
+При $N = 10$ измерений CUBE сгенерирует $2^{10} = 1024$ прохода группировки, что моментально приведет к падению СУБД по таймауту.`,
+      },
+    ],
+    taskDescription: `Сформируйте для BI-дашборда многоуровневый иерархический отчет по продажам из таблицы 'sales_mart' (детализация по регионам и категориям, подытоги по регионам и финальный гранд-итог):
+1. 'region': наименование региона (или '-- ВСЕ РЕГИОНЫ --' для строки гранд-итога).
+2. 'category': наименование категории (или '-- ВСЕ КАТЕГОРИИ --' для регионального подытога, '-- ГРАНД-ИТОГ --' для гранд-итога).
+3. 'total_revenue': суммарная выручка ('ROUND(SUM(amount), 2)').
+4. 'orders_count': общее количество заказов в данном срезе ('COUNT(*)').
+5. 'agg_level': текстовый уровень агрегации:
+   - 'DETAILED' — для детальных строк (регион + категория),
+   - 'SUBTOTAL_REGION' — для подытогов по регионам,
+   - 'GRAND_TOTAL' — для общего гранд-итога компании.
+Отсортируйте итоговый отчет: сначала детальные строки ('DETAILED'), затем региональные подытоги ('SUBTOTAL_REGION'), затем гранд-итог ('GRAND_TOTAL'); внутри уровней сортируйте по 'region' по возрастанию и по 'category' по возрастанию.`,
+    seedCode: `CREATE TABLE sales_mart (
+    sale_id INT PRIMARY KEY,
+    region VARCHAR(50),
+    category VARCHAR(50),
+    amount NUMERIC(10,2)
+);
+
+INSERT INTO sales_mart VALUES
+(1, 'Север', 'Электроника', 120000.00),
+(2, 'Север', 'Одежда', 45000.00),
+(3, 'Север', 'Электроника', 80000.00),
+(4, 'Юг', 'Электроника', 95000.00),
+(5, 'Юг', 'Одежда', 60000.00);`,
+    initialCode: `-- Сформируйте многоуровневый иерархический отчет через CTE и UNION ALL
+WITH bi_cubing AS (
+    -- 1. Срез DETAILED: GROUP BY region, category
+    -- 2. Срез SUBTOTAL_REGION: GROUP BY region
+    -- 3. Срез GRAND_TOTAL: общий итог
+)
+SELECT region, category, total_revenue, orders_count, agg_level
+FROM bi_cubing
+ORDER BY 
+    CASE WHEN agg_level = 'GRAND_TOTAL' THEN 3 WHEN agg_level = 'SUBTOTAL_REGION' THEN 2 ELSE 1 END,
+    region ASC,
+    category ASC;`,
+    solutionCode: `WITH bi_cubing AS (
+    SELECT 
+        region,
+        category,
+        ROUND(SUM(amount), 2) AS total_revenue,
+        COUNT(*) AS orders_count,
+        'DETAILED' AS agg_level
+    FROM sales_mart
+    GROUP BY region, category
+
+    UNION ALL
+
+    SELECT 
+        region,
+        '-- ВСЕ КАТЕГОРИИ --' AS category,
+        ROUND(SUM(amount), 2) AS total_revenue,
+        COUNT(*) AS orders_count,
+        'SUBTOTAL_REGION' AS agg_level
+    FROM sales_mart
+    GROUP BY region
+
+    UNION ALL
+
+    SELECT 
+        '-- ВСЕ РЕГИОНЫ --' AS region,
+        '-- ГРАНД-ИТОГ --' AS category,
+        ROUND(SUM(amount), 2) AS total_revenue,
+        COUNT(*) AS orders_count,
+        'GRAND_TOTAL' AS agg_level
+    FROM sales_mart
+)
+SELECT region, category, total_revenue, orders_count, agg_level
+FROM bi_cubing
+ORDER BY 
+    CASE WHEN agg_level = 'GRAND_TOTAL' THEN 3 WHEN agg_level = 'SUBTOTAL_REGION' THEN 2 ELSE 1 END,
+    region ASC,
+    category ASC;`,
+    testConfig: {
+      checkOrder: true,
+      floatPrecision: 2,
+      expectedRowCount: 7,
+      expectedColumns: ['region', 'category', 'total_revenue', 'orders_count', 'agg_level'],
+    },
+    brokenProdTask: {
+      title: 'Инцидент #114: Нарушение сортировки и структуры в сводном отчете',
+      incidentDescription: 'Дата-инженер забыл обернуть многоуровневые срезы в общий CTE, из-за чего сортировка ORDER BY применилась только к последнему блоку UNION ALL, разрушив структуру финансового дашборда.',
+      buggyCode: `SELECT 
+    region,
+    category,
+    ROUND(SUM(amount), 2) AS total_revenue,
+    COUNT(*) AS orders_count,
+    'DETAILED' AS agg_level
+FROM sales_mart
+GROUP BY region, category
+UNION ALL
+SELECT 
+    region,
+    '-- ВСЕ КАТЕГОРИИ --' AS category,
+    ROUND(SUM(amount), 2) AS total_revenue,
+    COUNT(*) AS orders_count,
+    'SUBTOTAL_REGION' AS agg_level
+FROM sales_mart
+GROUP BY region; -- ❌ Ошибка: отсутствует уровень GRAND_TOTAL и правильная глобальная сортировка`,
+      fixHint: 'Оберните все 3 уровня агрегации (DETAILED, SUBTOTAL_REGION, GRAND_TOTAL) в CTE bi_cubing и отсортируйте по CASE выражению agg_level.',
+      solutionCode: `WITH bi_cubing AS (
+    SELECT 
+        region,
+        category,
+        ROUND(SUM(amount), 2) AS total_revenue,
+        COUNT(*) AS orders_count,
+        'DETAILED' AS agg_level
+    FROM sales_mart
+    GROUP BY region, category
+
+    UNION ALL
+
+    SELECT 
+        region,
+        '-- ВСЕ КАТЕГОРИИ --' AS category,
+        ROUND(SUM(amount), 2) AS total_revenue,
+        COUNT(*) AS orders_count,
+        'SUBTOTAL_REGION' AS agg_level
+    FROM sales_mart
+    GROUP BY region
+
+    UNION ALL
+
+    SELECT 
+        '-- ВСЕ РЕГИОНЫ --' AS region,
+        '-- ГРАНД-ИТОГ --' AS category,
+        ROUND(SUM(amount), 2) AS total_revenue,
+        COUNT(*) AS orders_count,
+        'GRAND_TOTAL' AS agg_level
+    FROM sales_mart
+)
+SELECT region, category, total_revenue, orders_count, agg_level
+FROM bi_cubing
+ORDER BY 
+    CASE WHEN agg_level = 'GRAND_TOTAL' THEN 3 WHEN agg_level = 'SUBTOTAL_REGION' THEN 2 ELSE 1 END,
+    region ASC,
+    category ASC;`,
+      testConfig: {
+        checkOrder: true,
+        floatPrecision: 2,
+      },
+    },
+    hints: [
+      'Создайте CTE bi_cubing с тремя блоками, объединенными через UNION ALL: детальный срез, региональный подытог и гранд-итог.',
+      'В блоке регионального подытога укажите категорию как "-- ВСЕ КАТЕГОРИИ --", а agg_level как "SUBTOTAL_REGION".',
+      'Во внешнем запросе отсортируйте результат с помощью конструкции CASE WHEN agg_level = "GRAND_TOTAL" THEN 3 WHEN agg_level = "SUBTOTAL_REGION" THEN 2 ELSE 1 END, region ASC, category ASC.',
+    ],
+  },
+  {
+    id: 'sql-10',
+    moduleSlug: 'sql',
+    order: 10,
+    title: 'Идемпотентная загрузка витрин: UPSERT, обработка NULL в уникальных ключах и транзакционная перезапись',
+    estimatedMinutes: 40,
+    glossaryTerms: [
+      { term: 'Idempotency', definition: 'Идемпотентность — свойство операции при повторном выполнении давать точно такой же результат, как и при первом запуске (f(f(x)) = f(x)), без дубликатов и сбоев.' },
+      { term: 'UPSERT', definition: 'Гибридная операция UPDATE + INSERT: вставка новой строки либо обновление существующей при возникновении конфликта по первичному ключу или уникальному индексу.' },
+      { term: 'EXCLUDED Pseudo-table', definition: 'Специальная псевдотаблица в конструкции ON CONFLICT DO UPDATE, содержащая входящие значения строки из текущего INSERT, вызвавшей конфликт.' },
+      { term: 'NULLS NOT DISTINCT', definition: 'Опция стандарта SQL:2023 и PostgreSQL 15+, заставляющая уникальные индексы считать значения NULL равными друг другу для предотвращения скрытых дублей.' },
+      { term: 'Write-Audit-Publish (WAP)', definition: 'Архитектурный паттерн надежной загрузки: данные пишутся в изолированную промежуточную партицию, проходят валидацию качества и атомарно подменяются в витрине.' },
+    ],
+    schemaPreview: [
+      {
+        tableName: 'client_balances',
+        description: 'Целевая витрина актуальных клиентских балансов',
+        columns: [
+          { name: 'client_id', type: 'INT', keyType: 'PK' },
+          { name: 'account_num', type: 'VARCHAR(20)' },
+          { name: 'balance', type: 'NUMERIC(12,2)' },
+          { name: 'status', type: 'VARCHAR(20)' },
+          { name: 'updated_at', type: 'TIMESTAMP' },
+        ],
+        sampleRows: [
+          { client_id: 1, account_num: 'ACC-001', balance: 50000.00, status: 'active', updated_at: '2026-10-01 10:00:00' },
+          { client_id: 2, account_num: 'ACC-002', balance: 12000.00, status: 'frozen', updated_at: '2026-10-01 10:00:00' },
+          { client_id: 3, account_num: 'ACC-003', balance: 75000.00, status: 'active', updated_at: '2026-10-02 12:00:00' },
+        ],
+      },
+      {
+        tableName: 'incoming_batch',
+        description: 'Суточный пакет обновлений из процессинга (содержит изменения и новых клиентов)',
+        columns: [
+          { name: 'client_id', type: 'INT', keyType: 'PK' },
+          { name: 'account_num', type: 'VARCHAR(20)' },
+          { name: 'balance', type: 'NUMERIC(12,2)' },
+          { name: 'status', type: 'VARCHAR(20)' },
+          { name: 'updated_at', type: 'TIMESTAMP' },
+        ],
+        sampleRows: [
+          { client_id: 1, account_num: 'ACC-001', balance: 65000.00, status: 'active', updated_at: '2026-10-03 15:30:00' },
+          { client_id: 2, account_num: 'ACC-002', balance: 12000.00, status: 'active', updated_at: '2026-10-03 15:30:00' },
+          { client_id: 4, account_num: 'ACC-004', balance: 33000.00, status: 'active', updated_at: '2026-10-03 15:30:00' },
+        ],
+      },
+    ],
+    theoryBlocks: [
+      {
+        type: 'markdown',
+        content: `### Фундаментальный закон Data Engineering: Принцип идемпотентности
+
+В распределенных системах передачи данных сбои — это не исключение, а неизбежная норма:
+* Сетевые таймауты между Airflow и базой данных.
+* Перезапуски упавших контейнеров в Kubernetes.
+* Ручные перерасчеты исторических данных (**Backfill**) за прошлый месяц.
+
+Если пайплайн данных не является идемпотентным, любой повторный запуск приведет к фатальным последствиям: либо к падению с ошибкой \`Unique constraint violation\`, либо — что в сто раз хуже — к тихому **размножению и задвоению финансовых строк**!
+
+**Математическое определение:** 
+Операция $f$ называется **идемпотентной**, если повторное ее применение к результату не меняет состояния системы:
+$$f(f(x)) = f(x)$$
+
+#### Механика UPSERT: INSERT ... ON CONFLICT DO UPDATE
+В современных аналитических СУБД (PostgreSQL, SQLite, ClickHouse, Snowflake, Databricks) стандартом слияния изменений является операция **\`UPSERT\`**:
+
+\`\`\`sql
+INSERT INTO client_balances (client_id, account_num, balance, status, updated_at)
+VALUES (1, 'ACC-001', 65000.00, 'active', '2026-10-03 15:30:00')
+ON CONFLICT (client_id) DO UPDATE SET
+    balance = EXCLUDED.balance,
+    status = EXCLUDED.status,
+    updated_at = EXCLUDED.updated_at;
+\`\`\`
+
+**Как работает псевдотаблица \`EXCLUDED\` под капотом:**
+1. Движок СУБД пытается вставить строку в целевую таблицу.
+2. Проверяется уникальный B-Tree индекс по полю \`client_id\`.
+3. Если конфликта нет — строка физически записывается в страницу данных.
+4. Если конфликт обнаружен — движок не падает с ошибкой, а обращается к служебной структуре **\`EXCLUDED\`**, в которой хранятся значения строки, которую мы пытались вставить, и применяет выражение обновления \`UPDATE SET\`!
+
+#### Коварная ловушка: NULL в составных уникальных индексах
+Представьте, что вы создали составной уникальный ключ для филиальной сети:
+\`\`\`sql
+CREATE UNIQUE INDEX idx_org_branch ON branches (org_id, branch_code);
+\`\`\`
+По стандарту ANSI SQL значение \`NULL\` не равно другому значению \`NULL\` (\`NULL != NULL\`). 
+Поэтому если вы вставите две строки:
+* \`(10, NULL)\`
+* \`(10, NULL)\`
+Большинство СУБД (включая PostgreSQL версий ниже 15) **НЕ посчитают их дубликатами** и пропустят обе строки в таблицу! 
+Это классическая дыра безопасности данных, через которую в хранилища просачиваются миллионы дубликатов.
+
+**Решение:**
+В современном стандарте SQL:2023 и PostgreSQL 15+ всегда используйте явный модификатор:
+\`\`\`sql
+CREATE UNIQUE INDEX idx_org_branch ON branches (org_id, branch_code) NULLS NOT DISTINCT;
+\`\`\`
+
+#### Паттерн Write-Audit-Publish (WAP) и партиционная перезапись
+Для тяжелых пакетных хранилищ (Data Lakehouse, Parquet, Iceberg, ClickHouse) построчный \`UPSERT\` может быть слишком медленным.
+Вместо него применяется паттерн атомарной партиционной перезаписи:
+\`\`\`sql
+BEGIN TRANSACTION;
+-- 1. Удаляем данные строго за расчетную дату
+DELETE FROM sales_mart WHERE report_date = '2026-10-01';
+-- 2. Вставляем заново пересчитанную партицию
+INSERT INTO sales_mart SELECT * FROM staging_sales WHERE report_date = '2026-10-01';
+COMMIT;
+\`\`\`
+Благодаря транзакционной изоляции ACID клиенты витрины никогда не увидят таблицу в пустом или полузагруженном состоянии.`,
+      },
+      {
+        type: 'callout',
+        variant: 'analogy',
+        title: '💡 На пальцах: Картотека в поликлинике',
+        content: `Представьте регистратуру поликлиники:
+- **Неидемпотентный подход (наивный INSERT)**: При каждом визите пациента регистратор заводит новую медицинскую карту. Через год у одного человека оказывается 15 разных карточек, а врач не видит истории болезней.
+- **Идемпотентный подход (UPSERT)**: Регистратор ищет карточку по номеру паспорта (первичный ключ). Если карточка уже есть — он просто дописывает новый адрес и телефон (\`UPDATE\`). Если человека нет в базе — заводит новую карточку (\`INSERT\`). Сколько бы раз пациент ни обратился, у него всегда ровно одна актуальная карта.`,
+      },
+      {
+        type: 'data-flow',
+        data: {
+          title: 'Архитектура идемпотентного слияния данных (UPSERT Pipeline)',
+          nodes: [
+            { id: 'batch', label: 'Incoming Batch', sublabel: 'Суточный пакет данных', type: 'source', status: 'success' },
+            { id: 'check', label: 'Unique Index Check', sublabel: 'Проверка первичного ключа', type: 'transform', status: 'running' },
+            { id: 'insert', label: 'Insert Path', sublabel: 'Новый клиент (ACC-004)', type: 'storage', status: 'idle' },
+            { id: 'update', label: 'Update Path [EXCLUDED]', sublabel: 'Обновление баланса (ACC-001)', type: 'storage', status: 'idle' },
+          ],
+          edges: [
+            { from: 'batch', to: 'check', animated: true },
+            { from: 'check', to: 'insert', label: 'Конфликта нет', animated: true },
+            { from: 'check', to: 'update', label: 'ON CONFLICT', animated: true },
+          ],
+        },
+      },
+      {
+        type: 'callout',
+        variant: 'prod-danger',
+        title: '⚠️ Грабли в проде: Сбой ретрая в Airflow задвоил 25 миллионов финансовых записей',
+        content: `Ночной DAG в Airflow упал из-за сетевого таймаута на шаге записи в ClickHouse после того, как вставил 15 млн строк. 
+Airflow согласно политике ретраев перезапустил таску. Поскольку в коде использовался простой \`INSERT INTO ... SELECT\`, скрипт вставил еще 25 млн строк поверх уже записанных. Утром балансы всех счетов клиентов увеличились ровно в 2 раза, что вызвало остановку торгов на бирже.
+
+**Правило:** Любой даг Airflow, пишущий в базу данных, обязан быть идемпотентным (через UPSERT, ReplacingMergeTree с FINAL или DELETE за целевую партицию перед вставкой)!`,
+      },
+      {
+        type: 'callout',
+        variant: 'interview',
+        title: '🎯 Спросят на собесе: Что такое идемпотентность пайплайна и как гарантировать отсутствие дубликатов при падении ETL на середине?',
+        content: `**Ответ:** 
+Идемпотентность гарантирует, что многократный запуск пайплайна за один и тот же период дает один и тот же детерминированный результат без дублирования данных. 
+Методы гарантии:
+1. **UPSERT / MERGE:** Вставка с обновлением по естественному или суррогатному бизнес-ключу (\`ON CONFLICT DO UPDATE\`).
+2. **Атомарная партиционная перезапись:** Выполнение \`DELETE WHERE partition_date = :date\` и \`INSERT\` внутри единой ACID-транзакции.
+3. **Write-Audit-Publish (WAP):** Запись во временную таблицу/стейджинг, прогон проверок целостности (Data Quality tests), и атомарная подмена через \`ALTER TABLE SWAP / RENAME\`.`,
+      },
+    ],
+    taskDescription: `Реализуйте идемпотентную синхронизацию суточного пакета клиентских балансов из таблицы 'incoming_batch' в целевую витрину 'client_balances':
+1. Выполните идемпотентную операцию загрузки: если клиент уже существует в 'client_balances', обновите его баланс ('balance'), статус ('status') и время обновления ('updated_at'); если клиент новый — вставьте новую строку (используйте синтаксис 'INSERT OR REPLACE INTO' или 'INSERT ... ON CONFLICT').
+2. Вторым запросом выберите итоговое состояние витрины 'client_balances' со всеми колонками: 'client_id', 'account_num', 'balance', 'status', 'updated_at'.
+3. Отсортируйте итоговую выборку по 'client_id' по возрастанию.
+*Проверка идемпотентности:* Ваш скрипт должен безошибочно выдавать строго один и тот же результат при многократном повторном запуске!`,
+    seedCode: `CREATE TABLE client_balances (
+    client_id INT PRIMARY KEY,
+    account_num VARCHAR(20) NOT NULL,
+    balance NUMERIC(12,2) NOT NULL,
+    status VARCHAR(20) NOT NULL,
+    updated_at TIMESTAMP NOT NULL
+);
+
+INSERT INTO client_balances VALUES
+(1, 'ACC-001', 50000.00, 'active', '2026-10-01 10:00:00'),
+(2, 'ACC-002', 12000.00, 'frozen', '2026-10-01 10:00:00'),
+(3, 'ACC-003', 75000.00, 'active', '2026-10-02 12:00:00');
+
+CREATE TABLE incoming_batch (
+    client_id INT PRIMARY KEY,
+    account_num VARCHAR(20),
+    balance NUMERIC(12,2),
+    status VARCHAR(20),
+    updated_at TIMESTAMP
+);
+
+INSERT INTO incoming_batch VALUES
+(1, 'ACC-001', 65000.00, 'active', '2026-10-03 15:30:00'),
+(2, 'ACC-002', 12000.00, 'active', '2026-10-03 15:30:00'),
+(4, 'ACC-004', 33000.00, 'active', '2026-10-03 15:30:00');`,
+    initialCode: `-- Напишите идемпотентный скрипт загрузки витрины (UPSERT)
+-- 1. Синхронизация client_balances из incoming_batch
+-- 2. Итоговая выборка из client_balances с сортировкой по client_id ASC;`,
+    solutionCode: `INSERT OR REPLACE INTO client_balances (client_id, account_num, balance, status, updated_at)
+SELECT client_id, account_num, balance, status, updated_at
+FROM incoming_batch;
+
+SELECT client_id, account_num, balance, status, updated_at
+FROM client_balances
+ORDER BY client_id ASC;`,
+    testConfig: {
+      checkOrder: true,
+      floatPrecision: 2,
+      expectedRowCount: 4,
+      expectedColumns: ['client_id', 'account_num', 'balance', 'status', 'updated_at'],
+    },
+    brokenProdTask: {
+      title: 'Инцидент #115: Падение повторного ночного пайплайна с ошибкой Unique Violation',
+      incidentDescription: 'Дата-инженер написал загрузку через обычный неидемпотентный INSERT INTO, из-за чего при перезапуске упавшего пайплайна Airflow процесс свалился с фатальной ошибкой UNIQUE constraint failed: client_balances.client_id.',
+      buggyCode: `INSERT INTO client_balances (client_id, account_num, balance, status, updated_at)
+SELECT client_id, account_num, balance, status, updated_at
+FROM incoming_batch; -- ❌ Ошибка: обычный INSERT падает при наличии дубликатов ключа!
+
+SELECT client_id, account_num, balance, status, updated_at
+FROM client_balances
+ORDER BY client_id ASC;`,
+      fixHint: 'Сделайте загрузку идемпотентной с помощью конструкции INSERT OR REPLACE INTO.',
+      solutionCode: `INSERT OR REPLACE INTO client_balances (client_id, account_num, balance, status, updated_at)
+SELECT client_id, account_num, balance, status, updated_at
+FROM incoming_batch;
+
+SELECT client_id, account_num, balance, status, updated_at
+FROM client_balances
+ORDER BY client_id ASC;`,
+      testConfig: {
+        checkOrder: true,
+        floatPrecision: 2,
+      },
+    },
+    hints: [
+      'Для безопасной синхронизации существующих строк и вставки новых используйте команду INSERT OR REPLACE INTO client_balances (client_id, account_num, balance, status, updated_at).',
+      'Заполните поля данными из входящего пакета с помощью SELECT client_id, account_num, balance, status, updated_at FROM incoming_batch.',
+      'В конце скрипта выполните SELECT client_id, account_num, balance, status, updated_at FROM client_balances ORDER BY client_id ASC;.',
+    ],
+  },
 ];
