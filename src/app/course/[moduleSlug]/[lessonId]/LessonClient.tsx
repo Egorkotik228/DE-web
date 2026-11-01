@@ -21,6 +21,10 @@ import { SolutionConfirmModal } from '@/components/lesson/SolutionConfirmModal';
 import { DynamicMonaco } from '@/components/editor/DynamicMonaco';
 import { SchemaPreviewViewer } from '@/components/editor/SchemaPreviewViewer';
 import { OutputConsole } from '@/components/editor/OutputConsole';
+import { SchemaBuilderEngine } from '@/components/engines/SchemaBuilderEngine';
+import { CliTerminalEngine } from '@/components/engines/CliTerminalEngine';
+import { CodeValidatorEngine } from '@/components/engines/CodeValidatorEngine';
+import { SystemDesignEngine } from '@/components/engines/SystemDesignEngine';
 import {
   ChevronLeft,
   ChevronRight,
@@ -492,29 +496,57 @@ export default function LessonClient() {
 
             {mobileTab === 'editor' && (
               <div className="flex-1 flex flex-col overflow-hidden">
-                <EditorHeader
-                  rightPanelTab={rightPanelTab}
-                  onSetRightPanelTab={setRightPanelTab}
-                  isBrokenProdMode={isBrokenProdMode}
-                  onToggleBrokenProd={() => setIsBrokenProdMode(!isBrokenProdMode)}
-                  saveStatus={saveStatus}
-                  onResetCode={handleResetCode}
-                  brokenIncident={currentLesson.brokenProdTask.incidentDescription}
-                  engineStatus={engineStatus}
-                  engineMessage={engineMessage}
-                />
-                <div className="flex-1 overflow-hidden">
-                  {rightPanelTab === 'code' ? (
-                    <DynamicMonaco
-                      value={code}
-                      onChange={handleCodeChange}
-                      language={currentModule.engineType}
-                      onRunCode={handleRunCode}
+                {currentModule.engineType === 'schema-builder' ? (
+                  <SchemaBuilderEngine
+                    lesson={currentLesson}
+                    isBrokenProdMode={isBrokenProdMode}
+                    onLessonPassed={() => markLessonCompleted(currentLesson.id, currentModule.slug)}
+                  />
+                ) : currentModule.engineType === 'cli' ? (
+                  <CliTerminalEngine
+                    lesson={currentLesson}
+                    isBrokenProdMode={isBrokenProdMode}
+                    onLessonPassed={() => markLessonCompleted(currentLesson.id, currentModule.slug)}
+                  />
+                ) : currentModule.engineType === 'validator' ? (
+                  <CodeValidatorEngine
+                    lesson={currentLesson}
+                    isBrokenProdMode={isBrokenProdMode}
+                    onLessonPassed={() => markLessonCompleted(currentLesson.id, currentModule.slug)}
+                  />
+                ) : currentModule.engineType === 'system-design' ? (
+                  <SystemDesignEngine
+                    lesson={currentLesson}
+                    isBrokenProdMode={isBrokenProdMode}
+                    onLessonPassed={() => markLessonCompleted(currentLesson.id, currentModule.slug)}
+                  />
+                ) : (
+                  <>
+                    <EditorHeader
+                      rightPanelTab={rightPanelTab}
+                      onSetRightPanelTab={setRightPanelTab}
+                      isBrokenProdMode={isBrokenProdMode}
+                      onToggleBrokenProd={() => setIsBrokenProdMode(!isBrokenProdMode)}
+                      saveStatus={saveStatus}
+                      onResetCode={handleResetCode}
+                      brokenIncident={currentLesson.brokenProdTask.incidentDescription}
+                      engineStatus={engineStatus}
+                      engineMessage={engineMessage}
                     />
-                  ) : (
-                    <SchemaPreviewViewer schemas={currentLesson.schemaPreview} />
-                  )}
-                </div>
+                    <div className="flex-1 overflow-hidden">
+                      {rightPanelTab === 'code' ? (
+                        <DynamicMonaco
+                          value={code}
+                          onChange={handleCodeChange}
+                          language={currentModule.engineType}
+                          onRunCode={handleRunCode}
+                        />
+                      ) : (
+                        <SchemaPreviewViewer schemas={currentLesson.schemaPreview} />
+                      )}
+                    </div>
+                  </>
+                )}
               </div>
             )}
 
@@ -553,55 +585,81 @@ export default function LessonClient() {
               <div className="h-8 w-0.5 bg-[#7D8590] rounded-full" />
             </Separator>
 
-            {/* Right Panel: Workspace IDE & Bottom Output Console (55% default) */}
+            {/* Right Panel: Workspace IDE or Specialized Simulator (55% default) */}
             <Panel defaultSize="55%" minSize="30%" className="h-full overflow-hidden flex flex-col bg-[#090C10]">
-              <Group orientation="vertical" className="h-full w-full">
-                {/* Top IDE Panel: Editor or Schema (~60% default) */}
-                <Panel defaultSize="60%" minSize="30%" className="overflow-hidden flex flex-col">
-                  {/* Top Editor Header */}
-                  <EditorHeader
-                    rightPanelTab={rightPanelTab}
-                    onSetRightPanelTab={setRightPanelTab}
-                    isBrokenProdMode={isBrokenProdMode}
-                    onToggleBrokenProd={() => setIsBrokenProdMode(!isBrokenProdMode)}
-                    saveStatus={saveStatus}
-                    onResetCode={handleResetCode}
-                    brokenIncident={currentLesson.brokenProdTask.incidentDescription}
-                    engineStatus={engineStatus}
-                    engineMessage={engineMessage}
-                  />
+              {currentModule.engineType === 'schema-builder' ? (
+                <SchemaBuilderEngine
+                  lesson={currentLesson}
+                  isBrokenProdMode={isBrokenProdMode}
+                  onLessonPassed={() => markLessonCompleted(currentLesson.id, currentModule.slug)}
+                />
+              ) : currentModule.engineType === 'cli' ? (
+                <CliTerminalEngine
+                  lesson={currentLesson}
+                  isBrokenProdMode={isBrokenProdMode}
+                  onLessonPassed={() => markLessonCompleted(currentLesson.id, currentModule.slug)}
+                />
+              ) : currentModule.engineType === 'validator' ? (
+                <CodeValidatorEngine
+                  lesson={currentLesson}
+                  isBrokenProdMode={isBrokenProdMode}
+                  onLessonPassed={() => markLessonCompleted(currentLesson.id, currentModule.slug)}
+                />
+              ) : currentModule.engineType === 'system-design' ? (
+                <SystemDesignEngine
+                  lesson={currentLesson}
+                  isBrokenProdMode={isBrokenProdMode}
+                  onLessonPassed={() => markLessonCompleted(currentLesson.id, currentModule.slug)}
+                />
+              ) : (
+                <Group orientation="vertical" className="h-full w-full">
+                  {/* Top IDE Panel: Editor or Schema (~60% default) */}
+                  <Panel defaultSize="60%" minSize="30%" className="overflow-hidden flex flex-col">
+                    {/* Top Editor Header */}
+                    <EditorHeader
+                      rightPanelTab={rightPanelTab}
+                      onSetRightPanelTab={setRightPanelTab}
+                      isBrokenProdMode={isBrokenProdMode}
+                      onToggleBrokenProd={() => setIsBrokenProdMode(!isBrokenProdMode)}
+                      saveStatus={saveStatus}
+                      onResetCode={handleResetCode}
+                      brokenIncident={currentLesson.brokenProdTask.incidentDescription}
+                      engineStatus={engineStatus}
+                      engineMessage={engineMessage}
+                    />
 
-                  {/* Editor or Schema Content */}
-                  <div className="flex-1 overflow-hidden relative">
-                    {rightPanelTab === 'code' ? (
-                      <DynamicMonaco
-                        value={code}
-                        onChange={handleCodeChange}
-                        language={currentModule.engineType}
-                        onRunCode={handleRunCode}
-                      />
-                    ) : (
-                      <SchemaPreviewViewer schemas={currentLesson.schemaPreview} />
-                    )}
-                  </div>
-                </Panel>
+                    {/* Editor or Schema Content */}
+                    <div className="flex-1 overflow-hidden relative">
+                      {rightPanelTab === 'code' ? (
+                        <DynamicMonaco
+                          value={code}
+                          onChange={handleCodeChange}
+                          language={currentModule.engineType}
+                          onRunCode={handleRunCode}
+                        />
+                      ) : (
+                        <SchemaPreviewViewer schemas={currentLesson.schemaPreview} />
+                      )}
+                    </div>
+                  </Panel>
 
-                {/* Horizontal Resizable Separator */}
-                <Separator className="h-1.5 bg-[#21262D] hover:bg-emerald-500/50 transition-colors cursor-row-resize flex items-center justify-center">
-                  <div className="w-8 h-0.5 bg-[#7D8590] rounded-full" />
-                </Separator>
+                  {/* Horizontal Resizable Separator */}
+                  <Separator className="h-1.5 bg-[#21262D] hover:bg-emerald-500/50 transition-colors cursor-row-resize flex items-center justify-center">
+                    <div className="w-8 h-0.5 bg-[#7D8590] rounded-full" />
+                  </Separator>
 
-                {/* Bottom Console Panel (~40% default) */}
-                <Panel defaultSize="40%" minSize="20%" className="overflow-hidden flex flex-col">
-                  <OutputConsole
-                    response={workerResponse}
-                    isRunning={isRunning}
-                    onRunCode={handleRunCode}
-                    onVerifyCode={handleVerifyCode}
-                    testConfig={currentLesson.testConfig}
-                  />
-                </Panel>
-              </Group>
+                  {/* Bottom Console Panel (~40% default) */}
+                  <Panel defaultSize="40%" minSize="20%" className="overflow-hidden flex flex-col">
+                    <OutputConsole
+                      response={workerResponse}
+                      isRunning={isRunning}
+                      onRunCode={handleRunCode}
+                      onVerifyCode={handleVerifyCode}
+                      testConfig={currentLesson.testConfig}
+                    />
+                  </Panel>
+                </Group>
+              )}
             </Panel>
           </Group>
         )}
