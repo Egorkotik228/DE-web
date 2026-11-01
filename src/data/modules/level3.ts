@@ -10,7 +10,7 @@ export const level3Modules: TrackModule[] = [
     levelTitle: 'Уровень 3: СУБД и Моделирование DWH',
     engineType: 'sql',
     dependencies: ['sql'],
-    totalLessons: 10,
+    totalLessons: 6,
     curriculumTopics: [
       'Архитектура памяти PostgreSQL: shared_buffers, work_mem, maintenance_work_mem',
       'Физическая структура страницы (Page 8KB): Page Header, Line Pointers, Heap Tuples и ctid',

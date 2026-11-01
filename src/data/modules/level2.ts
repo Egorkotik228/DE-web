@@ -10,7 +10,7 @@ export const level2Modules: TrackModule[] = [
     levelTitle: 'Уровень 2: Ядро и Код',
     engineType: 'sql',
     dependencies: ['intro'],
-    totalLessons: 20,
+    totalLessons: 10,
     curriculumTopics: [
       'Логический порядок выполнения SQL-запроса (FROM -> JOIN -> WHERE -> GROUP BY -> HAVING -> SELECT -> WINDOW -> ORDER BY -> LIMIT)',
       'Троичная логика (3VL) и ловушки предикатов с NULL (NOT IN vs NOT EXISTS)',
@@ -231,7 +231,7 @@ msk_time = utc_now.astimezone(ZoneInfo("Europe/Moscow"))
     levelTitle: 'Уровень 2: Ядро и Код',
     engineType: 'python',
     dependencies: ['python'],
-    totalLessons: 12,
+    totalLessons: 8,
     curriculumTopics: [
       'Векторизация в Pandas против медленных циклов Python (iterrows / apply)',
       'Оптимизация памяти DataFrame: даункастинг числовых типов (int64 -> int16) и Category',
