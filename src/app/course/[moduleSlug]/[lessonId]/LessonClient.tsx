@@ -246,7 +246,7 @@ export default function LessonClient() {
 
       setWorkerResponse(res);
       if (res.verification?.passed) {
-        markLessonCompleted(currentLesson.id, currentModule.slug);
+        markLessonCompleted(currentLesson.id, currentModule.slug, isBrokenProdMode);
       }
     } catch (err: unknown) {
       const translated = translateError(err as Error, currentModule.engineType);
