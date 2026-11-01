@@ -3,12 +3,16 @@ import { postgresqlLesson1 } from './postgresql-lesson-1';
 import { postgresqlLesson2 } from './postgresql-lesson-2';
 import { postgresqlLesson3 } from './postgresql-lesson-3';
 import { postgresqlLesson4 } from './postgresql-lesson-4';
+import { postgresqlLesson5 } from './postgresql-lesson-5';
+import { postgresqlLesson6 } from './postgresql-lesson-6';
 
 export {
   postgresqlLesson1,
   postgresqlLesson2,
   postgresqlLesson3,
   postgresqlLesson4,
+  postgresqlLesson5,
+  postgresqlLesson6,
 };
 
 export const postgresqlLessons: Lesson[] = [
@@ -16,4 +20,6 @@ export const postgresqlLessons: Lesson[] = [
   postgresqlLesson2,
   postgresqlLesson3,
   postgresqlLesson4,
+  postgresqlLesson5,
+  postgresqlLesson6,
 ];
