@@ -1,10 +1,18 @@
 import { Lesson } from '@/types/course';
+import { sqlLesson1 } from './sql-lesson-1';
+import { sqlLesson2 } from './sql-lesson-2';
+import { sqlLesson3 } from './sql-lesson-3';
+import { sqlLesson4 } from './sql-lesson-4';
 
 export const sqlLessons: Lesson[] = [
+  sqlLesson1,
+  sqlLesson2,
+  sqlLesson3,
+  sqlLesson4,
   {
-    id: 'sql-1',
+    id: 'sql-5',
     moduleSlug: 'sql',
-    order: 1,
+    order: 5,
     title: 'Логический порядок выполнения SQL и ловушки троичной логики NULL',
     estimatedMinutes: 30,
     glossaryTerms: [
@@ -184,9 +192,9 @@ HAVING AVG(salary) > 150000;`,
     ],
   },
   {
-    id: 'sql-2',
+    id: 'sql-6',
     moduleSlug: 'sql',
-    order: 2,
+    order: 6,
     title: 'Оконные функции и фреймы: ROWS BETWEEN против RANGE BETWEEN',
     estimatedMinutes: 35,
     glossaryTerms: [
@@ -382,9 +390,9 @@ FROM daily_revenue;`,
     ],
   },
   {
-    id: 'sql-3',
+    id: 'sql-7',
     moduleSlug: 'sql',
-    order: 3,
+    order: 7,
     title: 'Сложные соединения: Коррелированные выборки, LATERAL-логика и предотвращение декартова взрыва',
     estimatedMinutes: 35,
     glossaryTerms: [
@@ -692,9 +700,9 @@ ORDER BY total_spent DESC, client_name ASC;`,
     ],
   },
   {
-    id: 'sql-4',
+    id: 'sql-8',
     moduleSlug: 'sql',
-    order: 4,
+    order: 8,
     title: 'Рекурсивные CTE: Обход графов, иерархий сотрудников и защита от вечных циклов',
     estimatedMinutes: 40,
     glossaryTerms: [
@@ -956,9 +964,9 @@ ORDER BY level ASC, employee_id ASC;`,
     ],
   },
   {
-    id: 'sql-5',
+    id: 'sql-9',
     moduleSlug: 'sql',
-    order: 5,
+    order: 9,
     title: 'Алгоритмический паттерн Gaps & Islands: Поиск непрерывных интервалов активности',
     estimatedMinutes: 40,
     glossaryTerms: [
@@ -1195,9 +1203,9 @@ ORDER BY start_date ASC;`,
     ],
   },
   {
-    id: 'sql-6',
+    id: 'sql-10',
     moduleSlug: 'sql',
-    order: 6,
+    order: 10,
     title: 'Продвинутая дедупликация и операции над множествами: UNION ALL против UNION, QUALIFY и анти-джойны',
     estimatedMinutes: 35,
     glossaryTerms: [
@@ -1502,9 +1510,9 @@ ORDER BY order_id ASC;`,
     ],
   },
   {
-    id: 'sql-7',
+    id: 'sql-11',
     moduleSlug: 'sql',
-    order: 7,
+    order: 11,
     title: 'Оконные фреймы под капотом: ROWS против RANGE, ловушка Peers и расчет скользящих метрик',
     estimatedMinutes: 35,
     glossaryTerms: [
@@ -1737,9 +1745,9 @@ ORDER BY ticker ASC, trade_date ASC, trade_id ASC;`,
     ],
   },
   {
-    id: 'sql-8',
+    id: 'sql-12',
     moduleSlug: 'sql',
-    order: 8,
+    order: 12,
     title: 'Временные смещения и сессионизация: LAG, LEAD, FIRST_VALUE и смертельная ловушка LAST_VALUE',
     estimatedMinutes: 40,
     glossaryTerms: [
@@ -1968,9 +1976,9 @@ ORDER BY session_id ASC, event_time ASC;`,
     ],
   },
   {
-    id: 'sql-9',
+    id: 'sql-13',
     moduleSlug: 'sql',
-    order: 9,
+    order: 13,
     title: 'Многомерные агрегации для BI-витрин: GROUPING SETS, ROLLUP, функция GROUPING() и условный FILTER',
     estimatedMinutes: 40,
     glossaryTerms: [
@@ -2268,9 +2276,9 @@ ORDER BY
     ],
   },
   {
-    id: 'sql-10',
+    id: 'sql-14',
     moduleSlug: 'sql',
-    order: 10,
+    order: 14,
     title: 'Идемпотентная загрузка витрин: UPSERT, обработка NULL в уникальных ключах и транзакционная перезапись',
     estimatedMinutes: 40,
     glossaryTerms: [
@@ -2501,3 +2509,5 @@ ORDER BY client_id ASC;`,
     ],
   },
 ];
+
+export { sqlLesson1, sqlLesson2, sqlLesson3, sqlLesson4 };

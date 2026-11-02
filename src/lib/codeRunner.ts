@@ -132,6 +132,41 @@ export function executeCode(
       break;
 
     case 'sql-1':
+      columns = ['order_id', 'total_amount', 'order_date'];
+      sampleRows = [
+        [101, 1400.0, '2026-10-01 10:15:00'],
+        [104, 750.0, '2026-10-03 14:20:00'],
+        [102, 599.99, '2026-10-02 11:30:00'],
+      ];
+      break;
+
+    case 'sql-2':
+      columns = ['country', 'sales_count', 'total_revenue', 'avg_check'];
+      sampleRows = [
+        ['Germany', 4, 18500.0, 4625.0],
+        ['USA', 5, 14200.0, 2840.0],
+      ];
+      break;
+
+    case 'sql-3':
+      columns = ['user_name', 'orders_count', 'total_spent'];
+      sampleRows = [
+        ['Елена', 3, 14500.0],
+        ['Иван', 2, 8500.0],
+        ['Алексей', 0, 0.0],
+      ];
+      break;
+
+    case 'sql-4':
+      columns = ['customer_id', 'total_spent', 'tier'];
+      sampleRows = [
+        [1, 12500.0, 'VIP'],
+        [3, 4200.0, 'Premium'],
+        [2, 1800.0, 'Standard'],
+      ];
+      break;
+
+    case 'sql-5':
       columns = ['dept_id', 'avg_salary', 'emp_count'];
       sampleRows = [
         [30, 300000.0, 1],
@@ -139,7 +174,7 @@ export function executeCode(
       ];
       break;
 
-    case 'sql-2':
+    case 'sql-6':
       columns = ['sale_date', 'revenue', 'moving_avg_3d'];
       sampleRows = [
         ['2026-10-01', 10000.0, 10000.0],
