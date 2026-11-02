@@ -134,98 +134,54 @@ export const clickhouseLesson7: Lesson = {
     {
       "type": "before-after-table",
       "data": {
-        "title": "Эффект применения broadcast() при соединении факта со справочником",
-        "beforeDescription": "Дефолтный SortMergeJoin без хинта (обе таблицы шафлятся)",
+        "title": "Сравнение Eager-вычислений (Pandas) и Lazy Evaluation (Spark)",
+        "beforeDescription": "Немедленные вычисления (Eager: Pandas)",
         "beforeColumns": [
-          "Тип Join",
-          "Объем Shuffle по сети",
-          "Время выполнения"
+          "processing_stage",
+          "memory_allocation",
+          "optimization_scope"
         ],
         "beforeRows": [
           [
-            "SortMergeJoin (дефолт)",
-            "2.0 TB (факт) + 20 MB (дим)",
-            "48 минут 30 сек"
+            "df = pd.read_csv('100GB.csv')",
+            "Loads 100GB into single RAM",
+            "Out-Of-Memory immediate crash"
           ],
           [
-            "Shuffle Spill Disk",
-            "180 GB промежуточных файлов",
-            "Высокая нагрузка на I/O"
+            "df = df[df['price'] > 100]",
+            "Filters already loaded data",
+            "Wasted read of discarded rows"
           ],
           [
-            "Сортировка ключей",
-            "100% CPU на всех экзекьюторах",
-            "Задержка очереди YARN"
+            "df = df[['id', 'price']]",
+            "Discards columns after read",
+            "Zero predicate/column pushdown"
           ]
         ],
-        "afterDescription": "BroadcastHashJoin с явным хинтом F.broadcast(dim)",
+        "afterDescription": "Ленивые вычисления (Lazy: Apache Spark)",
         "afterColumns": [
-          "Тип Join",
-          "Объем Shuffle по сети",
-          "Время выполнения"
+          "processing_stage",
+          "memory_allocation",
+          "optimization_scope"
         ],
         "afterRows": [
           [
-            "BroadcastHashJoin",
-            "0 байт для факта (только 20 MB дим)",
-            "2 минуты 15 сек"
+            "df = spark.read.parquet(...)",
+            "Instant 1ms metadata plan",
+            "Zero bytes read into memory"
           ],
           [
-            "Shuffle Spill Disk",
-            "0 байт (spill отсутствует)",
-            "Минимальный I/O диска"
+            "df = df.filter('price > 100')",
+            "Fused into scan filter",
+            "Pushed down into Parquet footer"
           ],
           [
-            "Потоковый Lookup",
-            "Параллельный доступ к хэш-карте",
-            "Снижение CPU в 8 раз"
+            "df.select('id', 'price').write",
+            "Reads ONLY 2 columns on action",
+            "Reads 1% of bytes at wire speed"
           ]
         ]
-      },
-      "beforeColumns": [
-        "Подход / Настройка",
-        "Механика",
-        "Последствие в проде"
-      ],
-      "afterColumns": [
-        "Подход / Настройка",
-        "Механика",
-        "Результат в проде"
-      ],
-      "beforeRows": [
-        [
-          "DISTRIBUTED BY (status_code)",
-          "Всего 5 значений на 64 сегмента",
-          "Дикий перекос (Skew) и падение 5 сегментов по диску"
-        ],
-        [
-          "JOIN таблиц с разными ключами дистрибуции",
-          "Тяжелый Redistribute Motion по сети",
-          "Упор в полосу пропускания Interconnect"
-        ],
-        [
-          "Забытая колонка дистрибуции в CREATE TABLE",
-          "Дефолт по первой колонке или RANDOMLY",
-          "Непредсказуемые планы и лишние перемещения"
-        ]
-      ],
-      "afterRows": [
-        [
-          "DISTRIBUTED BY (user_id) или (order_id)",
-          "Высокая кардинальность и ровный хэш",
-          "Идеально ровная загрузка всех 64 сегментов"
-        ],
-        [
-          "Одинаковый DISTRIBUTED BY у фактов и связей",
-          "Локальный Co-located Join внутри сегмента",
-          "Нулевой сетевой трафик при соединении"
-        ],
-        [
-          "DISTRIBUTED REPLICATED для малых справочников",
-          "Полная копия справочника на каждом сегменте",
-          "Мгновенный джойн без Broadcast Motion"
-        ]
-      ]
+      }
     },
     {
       "type": "callout",

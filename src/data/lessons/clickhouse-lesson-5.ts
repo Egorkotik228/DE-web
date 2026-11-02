@@ -134,98 +134,54 @@ export const clickhouseLesson5: Lesson = {
     {
       "type": "before-after-table",
       "data": {
-        "title": "Эффект применения broadcast() при соединении факта со справочником",
-        "beforeDescription": "Дефолтный SortMergeJoin без хинта (обе таблицы шафлятся)",
+        "title": "Сравнение Eager-вычислений (Pandas) и Lazy Evaluation (Spark)",
+        "beforeDescription": "Немедленные вычисления (Eager: Pandas)",
         "beforeColumns": [
-          "Тип Join",
-          "Объем Shuffle по сети",
-          "Время выполнения"
+          "processing_stage",
+          "memory_allocation",
+          "optimization_scope"
         ],
         "beforeRows": [
           [
-            "SortMergeJoin (дефолт)",
-            "2.0 TB (факт) + 20 MB (дим)",
-            "48 минут 30 сек"
+            "df = pd.read_csv('100GB.csv')",
+            "Loads 100GB into single RAM",
+            "Out-Of-Memory immediate crash"
           ],
           [
-            "Shuffle Spill Disk",
-            "180 GB промежуточных файлов",
-            "Высокая нагрузка на I/O"
+            "df = df[df['price'] > 100]",
+            "Filters already loaded data",
+            "Wasted read of discarded rows"
           ],
           [
-            "Сортировка ключей",
-            "100% CPU на всех экзекьюторах",
-            "Задержка очереди YARN"
+            "df = df[['id', 'price']]",
+            "Discards columns after read",
+            "Zero predicate/column pushdown"
           ]
         ],
-        "afterDescription": "BroadcastHashJoin с явным хинтом F.broadcast(dim)",
+        "afterDescription": "Ленивые вычисления (Lazy: Apache Spark)",
         "afterColumns": [
-          "Тип Join",
-          "Объем Shuffle по сети",
-          "Время выполнения"
+          "processing_stage",
+          "memory_allocation",
+          "optimization_scope"
         ],
         "afterRows": [
           [
-            "BroadcastHashJoin",
-            "0 байт для факта (только 20 MB дим)",
-            "2 минуты 15 сек"
+            "df = spark.read.parquet(...)",
+            "Instant 1ms metadata plan",
+            "Zero bytes read into memory"
           ],
           [
-            "Shuffle Spill Disk",
-            "0 байт (spill отсутствует)",
-            "Минимальный I/O диска"
+            "df = df.filter('price > 100')",
+            "Fused into scan filter",
+            "Pushed down into Parquet footer"
           ],
           [
-            "Потоковый Lookup",
-            "Параллельный доступ к хэш-карте",
-            "Снижение CPU в 8 раз"
+            "df.select('id', 'price').write",
+            "Reads ONLY 2 columns on action",
+            "Reads 1% of bytes at wire speed"
           ]
         ]
-      },
-      "beforeColumns": [
-        "Подход / Настройка",
-        "Механика",
-        "Последствие в проде"
-      ],
-      "afterColumns": [
-        "Подход / Настройка",
-        "Механика",
-        "Результат в проде"
-      ],
-      "beforeRows": [
-        [
-          "Фильтр по неключевой колонке без индекса",
-          "Чтение 100% гранул с диска",
-          "Высокий I/O на каждом поисковом запросе"
-        ],
-        [
-          "Два разных паттерна поиска по таблице",
-          "Быстрый поиск только по 1-му ключу",
-          "Второй запрос идет полным сканом"
-        ],
-        [
-          "Тяжелый GROUP BY по 10 млрд строк",
-          "Полный пересчет при каждом открытии BI",
-          "Задержка дашборда 25 секунд"
-        ]
-      ],
-      "afterRows": [
-        [
-          "INDEX idx_trace trace_id TYPE bloom_filter",
-          "Пропуск 98% гранул без чтения .bin",
-          "Точечный поиск trace_id за 50 мс"
-        ],
-        [
-          "ALTER TABLE ADD PROJECTION (ORDER BY user_id)",
-          "Автоматический выбор второй сортировки",
-          "Оба запроса работают по индексу"
-        ],
-        [
-          "Materialized View + AggregatingMergeTree",
-          "Инкрементальный подсчет при INSERT",
-          "Дашборд открывается за 10 миллисекунд"
-        ]
-      ]
+      }
     },
     {
       "type": "callout",

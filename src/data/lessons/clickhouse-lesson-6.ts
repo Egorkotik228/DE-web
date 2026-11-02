@@ -134,98 +134,54 @@ export const clickhouseLesson6: Lesson = {
     {
       "type": "before-after-table",
       "data": {
-        "title": "Эффект применения broadcast() при соединении факта со справочником",
-        "beforeDescription": "Дефолтный SortMergeJoin без хинта (обе таблицы шафлятся)",
+        "title": "Сравнение Eager-вычислений (Pandas) и Lazy Evaluation (Spark)",
+        "beforeDescription": "Немедленные вычисления (Eager: Pandas)",
         "beforeColumns": [
-          "Тип Join",
-          "Объем Shuffle по сети",
-          "Время выполнения"
+          "processing_stage",
+          "memory_allocation",
+          "optimization_scope"
         ],
         "beforeRows": [
           [
-            "SortMergeJoin (дефолт)",
-            "2.0 TB (факт) + 20 MB (дим)",
-            "48 минут 30 сек"
+            "df = pd.read_csv('100GB.csv')",
+            "Loads 100GB into single RAM",
+            "Out-Of-Memory immediate crash"
           ],
           [
-            "Shuffle Spill Disk",
-            "180 GB промежуточных файлов",
-            "Высокая нагрузка на I/O"
+            "df = df[df['price'] > 100]",
+            "Filters already loaded data",
+            "Wasted read of discarded rows"
           ],
           [
-            "Сортировка ключей",
-            "100% CPU на всех экзекьюторах",
-            "Задержка очереди YARN"
+            "df = df[['id', 'price']]",
+            "Discards columns after read",
+            "Zero predicate/column pushdown"
           ]
         ],
-        "afterDescription": "BroadcastHashJoin с явным хинтом F.broadcast(dim)",
+        "afterDescription": "Ленивые вычисления (Lazy: Apache Spark)",
         "afterColumns": [
-          "Тип Join",
-          "Объем Shuffle по сети",
-          "Время выполнения"
+          "processing_stage",
+          "memory_allocation",
+          "optimization_scope"
         ],
         "afterRows": [
           [
-            "BroadcastHashJoin",
-            "0 байт для факта (только 20 MB дим)",
-            "2 минуты 15 сек"
+            "df = spark.read.parquet(...)",
+            "Instant 1ms metadata plan",
+            "Zero bytes read into memory"
           ],
           [
-            "Shuffle Spill Disk",
-            "0 байт (spill отсутствует)",
-            "Минимальный I/O диска"
+            "df = df.filter('price > 100')",
+            "Fused into scan filter",
+            "Pushed down into Parquet footer"
           ],
           [
-            "Потоковый Lookup",
-            "Параллельный доступ к хэш-карте",
-            "Снижение CPU в 8 раз"
+            "df.select('id', 'price').write",
+            "Reads ONLY 2 columns on action",
+            "Reads 1% of bytes at wire speed"
           ]
         ]
-      },
-      "beforeColumns": [
-        "Подход / Настройка",
-        "Механика",
-        "Последствие в проде"
-      ],
-      "afterColumns": [
-        "Подход / Настройка",
-        "Механика",
-        "Результат в проде"
-      ],
-      "beforeRows": [
-        [
-          "Большая таблица фактов СПРАВА в JOIN",
-          "Попытка загрузить миллиарды строк в RAM",
-          "Падение с MEMORY_LIMIT_EXCEEDED"
-        ],
-        [
-          "Постоянный JOIN со справочником товаров",
-          "Построение Hash Map на каждом запросе",
-          "Лишние 3–5 секунд CPU и гигабайты памяти"
-        ],
-        [
-          "Distributed JOIN без GLOBAL",
-          "Каждый шард сам качает правую таблицу N раз",
-          "Умножение сетевого трафика на число шардов"
-        ]
-      ],
-      "afterRows": [
-        [
-          "Маленькая таблица СПРАВА в JOIN",
-          "Компактная Hash Map в памяти",
-          "Быстрое потоковое чтение левой таблицы"
-        ],
-        [
-          "Использование dictGet('products_dict', ...)",
-          "Чтение из готового кэша в RAM за O(1)",
-          "Ускорение запроса в 30 раз без JOIN"
-        ],
-        [
-          "GLOBAL JOIN в распределенном запросе",
-          "Инициатор собирает правую таблицу 1 раз",
-          "Защита от сетевого шторма (Read Amplification)"
-        ]
-      ]
+      }
     },
     {
       "type": "callout",
