@@ -279,7 +279,7 @@ result = salted_df1.join(exploded_df2, on="salted_key")
     levelTitle: 'Уровень 6: Big Data, Lakehouse & Streaming',
     engineType: 'sql',
     dependencies: ['postgresql', 'dwh'],
-    totalLessons: 10,
+    totalLessons: 8,
     curriculumTopics: [
       'Массивно-параллельная архитектура (MPP): Shared-Nothing против Shared-Disk (Greenplum / ClickHouse)',
       'Дистрибуция данных в Greenplum: сегменты, мастер, DISTRIBUTED BY (Hash, Replicated, Randomly)',
