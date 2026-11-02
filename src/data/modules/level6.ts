@@ -373,7 +373,7 @@ SELECT command, is_done, parts_to_do_names FROM system.mutations WHERE is_done =
     levelTitle: 'Уровень 6: Big Data, Lakehouse & Streaming',
     engineType: 'cli',
     dependencies: ['docker', 'postgresql'],
-    totalLessons: 10,
+    totalLessons: 8,
     curriculumTopics: [
       'Архитектура распределенного лога Apache Kafka: Брокеры, Топики, Партиции и сегменты (.log и .index)',
       'Секрет производительности Kafka: последовательная запись на диск (Sequential I/O), Page Cache ОС и Zero-Copy (sendfile)',
