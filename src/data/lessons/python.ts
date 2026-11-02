@@ -1,10 +1,18 @@
 import { Lesson } from '@/types/course';
+import { pythonLesson1 } from './python-lesson-1';
+import { pythonLesson2 } from './python-lesson-2';
+import { pythonLesson3 } from './python-lesson-3';
+import { pythonLesson4 } from './python-lesson-4';
 
 export const pythonLessons: Lesson[] = [
+  pythonLesson1,
+  pythonLesson2,
+  pythonLesson3,
+  pythonLesson4,
   {
-    id: 'python-1',
+    id: 'python-5',
     moduleSlug: 'python',
-    order: 1,
+    order: 5,
     title: 'Потоковая обработка файлов через генераторы (yield) без OOM',
     estimatedMinutes: 30,
     glossaryTerms: [
@@ -140,9 +148,9 @@ transactions_data = [
     ],
   },
   {
-    id: 'python-2',
+    id: 'python-6',
     moduleSlug: 'python',
-    order: 2,
+    order: 6,
     title: 'Надежные сетевые коннекторы: Пагинация, UTC и Exponential Backoff',
     estimatedMinutes: 35,
     glossaryTerms: [
@@ -278,9 +286,9 @@ def is_event_stale(event_utc_time):
     ],
   },
 {
-  "id": "python-3",
+  "id": "python-7",
   "moduleSlug": "python",
-  "order": 3,
+  "order": 7,
   "title": "Контракты данных (Data Contracts), валидация схем и паттерн Dead Letter Queue (DLQ)",
   "estimatedMinutes": 35,
   "glossaryTerms": [
@@ -384,9 +392,9 @@ def is_event_stale(event_utc_time):
   ]
 },
 {
-  "id": "python-4",
+  "id": "python-8",
   "moduleSlug": "python",
-  "order": 4,
+  "order": 8,
   "title": "Пакетная вставка (Batching / Chunking) и управление транзакциями при загрузке в БД",
   "estimatedMinutes": 30,
   "glossaryTerms": [
@@ -488,9 +496,9 @@ def is_event_stale(event_utc_time):
   ]
 },
 {
-  "id": "python-5",
+  "id": "python-9",
   "moduleSlug": "python",
-  "order": 5,
+  "order": 9,
   "title": "Идемпотентность, дедупликация в памяти и криптографическое хэширование (SHA-256)",
   "estimatedMinutes": 35,
   "glossaryTerms": [
@@ -584,9 +592,9 @@ def is_event_stale(event_utc_time):
   ]
 },
 {
-  "id": "python-6",
+  "id": "python-10",
   "moduleSlug": "python",
-  "order": 6,
+  "order": 10,
   "title": "Контекстные менеджеры (with), управление ресурсами и транзакционная безопасность",
   "estimatedMinutes": 30,
   "glossaryTerms": [
@@ -680,9 +688,9 @@ def is_event_stale(event_utc_time):
   ]
 },
 {
-  "id": "python-7",
+  "id": "python-11",
   "moduleSlug": "python",
-  "order": 7,
+  "order": 11,
   "title": "Конкурентность в Data Engineering: GIL, I/O-bound против CPU-bound и лимиты пулов",
   "estimatedMinutes": 35,
   "glossaryTerms": [
@@ -781,9 +789,9 @@ def is_event_stale(event_utc_time):
   ]
 },
 {
-  "id": "python-8",
+  "id": "python-12",
   "moduleSlug": "python",
-  "order": 8,
+  "order": 12,
   "title": "Тестирование дата-пайплайнов (pytest), Чистые функции и Data Quality Assertions",
   "estimatedMinutes": 35,
   "glossaryTerms": [

@@ -1,9 +1,9 @@
 import type { Lesson } from '@/types/course';
 
-export const pandasLesson7: Lesson = {
-  id: 'pandas-7',
+export const pandasLesson11: Lesson = {
+  id: 'pandas-11',
   moduleSlug: 'pandas',
-  order: 7,
+  order: 11,
   title: 'Polars Lazy API: scan_csv, оптимизатор запросов и стриминг',
   estimatedMinutes: 35,
 

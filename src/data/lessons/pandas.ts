@@ -1,12 +1,12 @@
-import { pandasLesson8 } from './pandas-lesson-8';
-import { pandasLesson7 } from './pandas-lesson-7';
+import { pandasLesson12 } from './pandas-lesson-12';
+import { pandasLesson11 } from './pandas-lesson-11';
 import { Lesson } from '@/types/course';
 
 export const pandasLessons: Lesson[] = [
   {
-    id: 'pandas-1',
+    id: 'pandas-5',
     moduleSlug: 'pandas',
-    order: 1,
+    order: 5,
     title: 'Векторизация против циклов и оптимизация памяти (Downcasting типов)',
     estimatedMinutes: 30,
     glossaryTerms: [
@@ -151,9 +151,9 @@ test_df = pd.DataFrame({
     ],
   },
   {
-    id: 'pandas-2',
+    id: 'pandas-6',
     moduleSlug: 'pandas',
-    order: 2,
+    order: 6,
     title: 'Переход на Polars: Apache Arrow, Lazy API и Predicate Pushdown',
     estimatedMinutes: 35,
     glossaryTerms: [
@@ -292,9 +292,9 @@ servers = [
     ],
   },
   {
-    "id": "pandas-3",
+    "id": "pandas-7",
     "moduleSlug": "pandas",
-    "order": 3,
+    "order": 7,
     "title": "Оптимизация памяти: downcasting, category и memory_usage(deep=True)",
     "estimatedMinutes": 25,
     "theoryBlocks": [
@@ -606,9 +606,9 @@ servers = [
     "hints": ["Используйте pd.to_numeric с downcast='unsigned' для целых чисел.", "", "Приводите object-колонки с низкой кардинальностью к category."]
   },
   {
-    "id": "pandas-4",
+    "id": "pandas-8",
     "moduleSlug": "pandas",
-    "order": 4,
+    "order": 8,
     "title": "Анатомия pd.merge: взрыв строк, validate и дубликаты в справочниках",
     "estimatedMinutes": 30,
     "theoryBlocks": [
@@ -794,9 +794,9 @@ servers = [
     "hints": ["Дедуплицируйте справочник customers перед merge.", "", "Используйте validate='many_to_one'."]
   },
   {
-    "id": "pandas-5",
+    "id": "pandas-9",
     "moduleSlug": "pandas",
-    "order": 5,
+    "order": 9,
     "title": "Оконная аналитика в Pandas: transform против agg, cumsum, shift и diff",
     "estimatedMinutes": 30,
     "theoryBlocks": [
@@ -967,6 +967,6 @@ servers = [
         ""
       ]
   },
-  pandasLesson7,
-  pandasLesson8,
+  pandasLesson11,
+  pandasLesson12,
 ];

@@ -1,9 +1,9 @@
 import { Lesson } from '@/types/course';
 
-export const pandasLesson8: Lesson = {
-  "id": "pandas-8",
+export const pandasLesson12: Lesson = {
+  "id": "pandas-12",
   "moduleSlug": "pandas",
-  "order": 8,
+  "order": 12,
   "title": "Apache Arrow, Zero-Copy и бенчмаркинг: когда что использовать (Arrow, PyArrow backend & Benchmarking)",
   "estimatedMinutes": 35,
   "glossaryTerms": [
