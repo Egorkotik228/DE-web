@@ -183,7 +183,7 @@ hdfs dfs -setrep -w 3 /data/prod/core_marts
     levelTitle: 'Уровень 6: Big Data, Lakehouse & Streaming',
     engineType: 'python',
     dependencies: ['hadoop', 'pandas'],
-    totalLessons: 12,
+    totalLessons: 8,
     curriculumTopics: [
       'Архитектура кластера: Driver Program, Cluster Manager, Executors, Tasks и Cores/Slots',
       'Отказоустойчивые распределенные датасеты: RDD, DataFrame и Dataset API',
