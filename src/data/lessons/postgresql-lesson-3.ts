@@ -4,73 +4,73 @@ export const postgresqlLesson3: Lesson = {
   "id": "postgresql-3",
   "moduleSlug": "postgresql",
   "order": 3,
-  "title": "Table & Index Bloat, VACUUM, Autovacuum, карты FSM/VM и HOT-обновления",
+  "title": "Физика хранения: Страницы (Pages 8 КБ), Heap, Tuple Header и TOAST",
   "estimatedMinutes": 35,
   "glossaryTerms": [
     {
-      "term": "Table Bloat (Раздувание)",
-      "definition": "Накопление «мертвых» версий строк (Dead Tuples) и пустых страниц на диске после операций UPDATE/DELETE, приводящее к замедлению Seq Scan и росту дискового I/O."
+      "term": "Page (Страница 8 КБ)",
+      "definition": "Базовый квант дискового ввода-вывода в PostgreSQL размером 8192 байта, содержащий заголовок, массив указателей Line Pointers и сами кортежи данных."
     },
     {
-      "term": "HOT (Heap-Only Tuple)",
-      "definition": "Оптимизация обновлений в PostgreSQL: новая версия строки размещается на той же 8 КБ странице, связывается цепочкой указателей ctid и не требует перестроения индексов таблицы."
+      "term": "HeapTupleHeader",
+      "definition": "Заголовок кортежа размером 23 байта, содержащий системные метаданные видимости: t_xmin, t_xmax, t_cid, t_ctid, t_infomask и битовую маску NULL."
     },
     {
-      "term": "Visibility Map (VM)",
-      "definition": "Служебная битовая карта таблицы, отслеживающая страницы, где все строки гарантированно видимы всем транзакциям (позволяет VACUUM пропускать блоки, а планировщику делать Index-Only Scan)."
+      "term": "Column Alignment (Column Tetris)",
+      "definition": "Аппаратное выравнивание типов данных по границам адресов (2, 4, 8 байт). Неоптимальный порядок колонок создает байтовые дыры (Padding) и раздувает таблицу на 20–30%."
     },
     {
-      "term": "Free Space Map (FSM)",
-      "definition": "Служебная бинарная карта свободного пространства страниц таблицы, используемая для мгновенного поиска 8 КБ блока, в который поместится новый кортеж при INSERT/UPDATE."
+      "term": "TOAST",
+      "definition": "The Oversized-Attribute Storage Technique — механизм выноса широких полей (>2 КБ) в отдельную вспомогательную таблицу со сжатием (pglz/lz4) и нарезкой на чанки."
     }
   ],
   "schemaPreview": [
     {
-      "tableName": "table_bloat_monitoring",
+      "tableName": "table_storage_audit",
       "columns": [
         {
-          "name": "relname",
+          "name": "table_name",
           "type": "TEXT",
           "keyType": "PK"
         },
         {
-          "name": "n_live_tup",
+          "name": "unaligned_row_bytes",
           "type": "INTEGER"
         },
         {
-          "name": "n_dead_tup",
+          "name": "aligned_row_bytes",
           "type": "INTEGER"
         },
         {
-          "name": "autovacuum_threshold",
+          "name": "total_rows",
           "type": "INTEGER"
         },
         {
-          "name": "table_size_mb",
-          "type": "FLOAT"
+          "name": "toast_bytes",
+          "type": "INTEGER"
         }
       ],
       "sampleRows": [
         {
-          "relname": "orders",
-          "n_live_tup": 10000000,
-          "n_dead_tup": 2800000,
-          "autovacuum_threshold": 2000050,
-          "table_size_mb": 4200.0
+          "table_name": "user_profiles",
+          "unaligned_row_bytes": 48,
+          "aligned_row_bytes": 32,
+          "total_rows": 2000000,
+          "toast_bytes": 10485760
         },
         {
-          "relname": "users",
-          "n_live_tup": 5000000,
-          "n_dead_tup": 150000,
-          "autovacuum_threshold": 1000050,
-          "table_size_mb": 850.0
+          "table_name": "audit_logs",
+          "unaligned_row_bytes": 56,
+          "aligned_row_bytes": 40,
+          "total_rows": 5000000,
+          "toast_bytes": 0
         },
         {
-          "relname": "inventory_items",
-          "n_live_tup": 2000000,
-          "n_dead_tup": 950000,
-          "autovacuum_threshold": 400050,
-          "table_size_mb": 980.0
+          "table_name": "product_catalog",
+          "unaligned_row_bytes": 40,
+          "aligned_row_bytes": 36,
+          "total_rows": 500000,
+          "toast_bytes": 52428800
         }
       ]
     }
@@ -78,62 +78,62 @@ export const postgresqlLesson3: Lesson = {
   "theoryBlocks": [
     {
       "type": "markdown",
-      "content": "### Анатомия раздувания (Bloat) таблиц и индексов в PostgreSQL\n\nИз-за многоверсионной модели MVCC операции `DELETE` и `UPDATE` никогда не перезаписывают данные на месте. При каждом `UPDATE` создается новая версия строки, а старая помечается мертвой (`dead tuple`).\n\nЕсли таблица заказов содержит 10 миллионов строк, но за сутки в ней происходит 20 миллионов обновлений статусов, в файле таблицы на диске скапливаются десятки миллионов мертвых кортежей. Таблица раздувается с 2 ГБ до **30 ГБ** (явление **Table Bloat**). Запрос `SELECT COUNT(*)` или `Seq Scan` вынужден считывать с диска гигантский массив пустых и мертвых страниц, что обрушивает производительность ввода-вывода (I/O) и забивает кэш `shared_buffers` мусором.\n\n#### Физика работы VACUUM: что он делает, а чего не делает\nСтандартная команда `VACUUM` (и фоновый демон `Autovacuum`):\n1. **Очищает мертвые кортежи:** Удаляет указатели `Line Pointers` на мертвые строки внутри 8 КБ страниц, освобождая место для будущих вставок `INSERT`.\n2. **Обновляет FSM (Free Space Map):** Записывает освобожденные байты в карту свободного пространства, чтобы новые строки вставлялись в старые дыры, а не расширяли файл таблицы.\n3. **Обновляет VM (Visibility Map):** Помечает страницы, где больше нет мертвых строк, флагом `all-visible` (это дает колоссальное ускорение `Index-Only Scan`).\n4. **НЕ блокирует пользователей:** Работает в фоне в режиме `ShareUpdateExclusiveLock`, позволяя параллельно читать и изменять таблицу.\n5. **⚠️ ВАЖНО:** Обычный `VACUUM` **НЕ возвращает место операционной системе**! Размер файла на диске остается прежним (за исключением обрезки пустых блоков в самом хвосте файла — page truncation).\n\n#### VACUUM FULL vs pg_repack: Как сжать таблицу на диске\n- **VACUUM FULL:** Создает новый файл таблицы, копирует туда только живые кортежи и удаляет старый раздутый файл. Место на диске освобождается полностью. **Опасность:** берет `AccessExclusiveLock` — блокирует ЛЮБЫЕ операции чтения и записи на все время перестроения (часы простоя на больших базах!).\n- **pg_repack:** Утилита онлайн-компактизации. Создает теневую таблицу (shadow table), копирует данные, переносит инкрементальные изменения через триггер и подменяет файлы с блокировкой всего на доли секунды.\n\n#### HOT (Heap-Only Tuple) обновления: Спасение индексов\nЕсли у таблицы 10 индексов, обычный `UPDATE` обязан добавить новую запись в каждый из 10 индексов (так как изменился `ctid` строки). Это вызывает колоссальный write amplification.\n\nМеханизм **HOT-обновления** активируется автоматически, если соблюдены 2 условия:\n1. Ни одна из колонок, входящих в индексы таблицы, **не была изменена** в запросе `UPDATE`.\n2. На текущей 8 КБ странице есть свободное место (`Free Space`) для размещения новой версии строки.\n\nВ этом случае PostgreSQL сохраняет новую строку на той же странице и связывает старый Line Pointer с новым цепочкой указателей прямо в Heap. **Индексы не трогаются вообще!** Для поддержки HOT часто обновляемым таблицам задают параметр `fillfactor`:\n```sql\nALTER TABLE orders SET (fillfactor = 80);\n```\nЭто оставляет 20% свободного места на каждой странице специально под будущие HOT-обновления.\n\n#### Тюнинг Autovacuum на больших объемах\nПо умолчанию порог запуска очистки рассчитывается как:\n`threshold = autovacuum_vacuum_threshold (50) + autovacuum_vacuum_scale_factor (0.2) * n_live_tup`.\nДля таблицы на 100 млн строк `scale_factor = 0.2` означает, что Autovacuum запустится только после накопления **20 миллионов мертвых строк**! За это время диск кластера успеет переполниться.\n\n**Решение для Highload DWH:** переопределение параметров на уровне конкретных тяжелых таблиц:\n```sql\nALTER TABLE orders SET (\n    autovacuum_vacuum_scale_factor = 0.01,\n    autovacuum_vacuum_cost_limit = 2000\n);\n```"
+      "content": "### Как таблица PostgreSQL физически устроена на диске\n\nВ реляционной СУБД PostgreSQL таблицы и индексы не хранятся единым неделимым файлом. В директории кластера `$PGDATA/base/<db_oid>/<relfilenode>` таблица разбивается на сегменты по **1 ГБ** (чтобы не упираться в лимиты файловых систем на старых ОС).\n\nКаждый гигабайтный сегмент представляет собой непрерывный массив **страниц памяти (Pages / Blocks)** фиксированного размера **8192 байта (8 КБ)**. Именно страница является атомарной единицей дискового ввода-вывода (I/O) и кэширования в общем пуле памяти СУБД — `shared_buffers`.\n\n#### Внутренняя анатомия 8-килобайтной страницы (Page Layout)\nСтраница организована по принципу «встречного движения»:\n1. **PageHeaderData (24 байта):** Заголовок страницы в самом начале. Хранит LSN (Log Sequence Number) последней записи WAL для контроля целостности, контрольную сумму (checksum), смещения свободного пространства `pd_lower` и `pd_upper`.\n2. **Массив указателей Line Pointers (ItemIdData):** Растет **сверху вниз** (сразу после `PageHeaderData`). Каждый указатель занимает ровно **4 байта** и содержит флаги состояния, смещение и длину соответствующей строки в байтах.\n3. **Свободное пространство (Free Space):** Дырка между концом массива указателей `pd_lower` и началом данных кортежей `pd_upper`. Сюда вставляются новые строки.\n4. **Кортежи строк (HeapTupleData):** Записываются в конец страницы и растут **снизу вверх**.\n5. **Физический адрес `ctid`:** Пара чисел `(номер_страницы, номер_указателя_в_массиве)`, например `(0, 1)`. Индексы B-Tree указывают именно на `ctid` (Line Pointer), а не на физические байты строки в куче. Если кортеж перемещается внутри страницы при HOT-обновлении (Heap-Only Tuple), `ctid` в индексе не меняется!\n\n#### Заголовок строки HeapTupleHeader и Column Tetris (Выравнивание данных)\nКаждая отдельная строка на диске предваряется тяжелым заголовком **HeapTupleHeader (23 байта)**:\n- `t_xmin` (4 байта) — XID транзакции создания.\n- `t_xmax` (4 байта) — XID транзакции удаления/обновления.\n- `t_cid` (4 байта) — Command ID внутри транзакции.\n- `t_ctid` (6 байт) — физический адрес текущей или более свежей версии строки.\n- `t_infomask` (4 байта) — битовые флаги статуса (наличие NULL, коммит транзакции).\n- Битовая маска NULL (Null Bitmap, переменная длина, минимум 1 байт).\n\nЗатем следует архитектурное выравнивание процессора (**CPU Memory Alignment**): 8-байтовые типы (`int8`, `timestamptz`, `float8`) обязаны начинаться по адресам, кратным 8 байтам. 4-байтовые (`int4`) — кратным 4, 2-байтовые (`int2`) — кратным 2.\n\n```text\n❌ НЕОПТИМАЛЬНЫЙ ПОРЯДОК: CREATE TABLE bad (a int2, b int8, c int2, d int8);\n[Заголовок 23Б] + [pad 1Б] + [a: 2Б] + [pad 6Б!] + [b: 8Б] + [c: 2Б] + [pad 6Б!] + [d: 8Б] = 48 байт!\n\n✅ ОПТИМИЗИРОВАННЫЙ (Column Tetris): CREATE TABLE good (b int8, d int8, a int2, c int2);\n[Заголовок 23Б] + [pad 1Б] + [b: 8Б] + [d: 8Б] + [a: 2Б] + [c: 2Б] + [pad 4Б] = 40 байт! (Экономия 17% диска!)\n```\n\n#### Механизм TOAST (The Oversized-Attribute Storage Technique)\nЕсли размер строки превышает четверть страницы (~2 КБ, `TOAST_TUPLE_THRESHOLD`), строка не поместится в страницу. PostgreSQL активирует механизм **TOAST**:\n1. Широкое поле сжимается (алгоритм `pglz` по умолчанию или современный `lz4`).\n2. Если поле все еще велико, оно разрезается на чанки по ~2 КБ и выносится в отдельную скрытую таблицу `pg_toast_<oid>`.\n3. В исходной строке остается 18-байтовый указатель `TOAST Pointer`.\n\nСтратегии хранения колонок:\n- `PLAIN`: сжатие и вынос запрещены (только числа и короткие типы).\n- `EXTENDED`: сначала сжатие, если не помогло — вынос в TOAST (по умолчанию для `TEXT`, `JSONB`, `BYTEA`).\n- `EXTERNAL`: вынос в TOAST без сжатия (ускоряет работу с подстроками).\n- `MAIN`: сжатие разрешено, но вынос в TOAST только в крайнем случае."
     },
     {
       "type": "callout",
       "variant": "analogy",
-      "title": "💡 На пальцах: Уборка в квартирах против сноса дома",
-      "content": "Обычный VACUUM — это уборка мусора в освободившихся квартирах жилого дома. Комнаты очистились, в них можно заселять новых жильцов (новые INSERT), но сам дом меньше по высоте не стал, и земельный участок городу (ОС) не вернулся. VACUUM FULL — это принудительное выселение всех жителей в палаточный лагерь (AccessExclusiveLock), полный снос старого 20-этажного дома и постройка компактной 5-этажки на освободившейся земле. Вход закрыт для всех, жизнь парализована."
+      "title": "💡 На пальцах: Гостиничный этаж с ресепшеном",
+      "content": "Страница 8 КБ — это гостиничный этаж. Входной ресепшен — это Line Pointers: он выдает гостю карточку с номером 1, 2, 3... Сами гости (строки) заселяются в номера в глубине коридора. Курьеры доставки (индексы B-Tree) знают только: «Этаж 4, гость №2». Если гость сменил комнату на том же этаже (HOT-обновление), ресепшен просто меняет стрелочку у себя в журнале. Внешним курьерам не нужно менять свои карты и адресные книги!"
     },
     {
       "type": "before-after-table",
       "data": {
-        "title": "Сравнение дефолтного Autovacuum и настроенного под Highload",
-        "beforeDescription": "Дефолтные настройки PostgreSQL для скромных веб-приложений",
+        "title": "Сравнение физического выравнивания колонок в PostgreSQL (Column Tetris)",
+        "beforeDescription": "Неоптимальный порядок колонок с фрагментацией памяти (Padding Holes)",
         "beforeColumns": [
-          "Параметр / Метрика",
-          "Дефолтный Autovacuum (scale=0.2)",
-          "Highload тюнинг (scale=0.01 + HOT)"
+          "Параметр",
+          "Хаотичный порядок колонок",
+          "Оптимальный Column Tetris"
         ],
         "beforeRows": [
           [
-            "Порог очистки (100M строк)",
-            "20 000 050 мертвых строк",
-            "1 000 050 мертвых строк"
+            "Схема таблицы",
+            "int2, int8, int2, int8",
+            "int8, int8, int2, int2"
           ],
           [
-            "Запас под HOT-обновления",
-            "0% запаса (fillfactor = 100)",
-            "20% свободного места (fillfactor = 80)"
+            "Размер кортежа в RAM/диске",
+            "48 байт (13 байт пустых дыр)",
+            "40 байт (минимум padding)"
           ],
           [
-            "Динамика раздувания Bloat",
-            "Пиковый Bloat до 40–60%",
-            "Стабильный Bloat < 5% без всплесков"
+            "Объем таблицы на 100M строк",
+            "4.8 ГБ (Heap) + медленный I/O",
+            "4.0 ГБ (экономия 800 МБ)"
           ]
         ],
-        "afterDescription": "Агрессивный тюнинг для тяжелых OLTP/DWH таблиц",
+        "afterDescription": "Оптимальный порядок: тяжелые 8-байтовые типы первыми, мелкие в конце",
         "afterColumns": [
-          "Параметр / Метрика",
-          "Дефолтный Autovacuum (scale=0.2)",
-          "Highload тюнинг (scale=0.01 + HOT)"
+          "Параметр",
+          "Хаотичный порядок колонок",
+          "Оптимальный Column Tetris"
         ],
         "afterRows": [
           [
-            "Порог очистки (100M строк)",
-            "20 000 050 мертвых строк",
-            "1 000 050 мертвых строк"
+            "Схема таблицы",
+            "int2, int8, int2, int8",
+            "int8, int8, int2, int2"
           ],
           [
-            "Запас под HOT-обновления",
-            "0% запаса (fillfactor = 100)",
-            "20% свободного места (fillfactor = 80)"
+            "Размер кортежа в RAM/диске",
+            "48 байт (13 байт пустых дыр)",
+            "40 байт (минимум padding)"
           ],
           [
-            "Динамика раздувания Bloat",
-            "Пиковый Bloat до 40–60%",
-            "Стабильный Bloat < 5% без всплесков"
+            "Объем таблицы на 100M строк",
+            "4.8 ГБ (Heap) + медленный I/O",
+            "4.0 ГБ (экономия 800 МБ)"
           ]
         ]
       }
@@ -141,50 +141,50 @@ export const postgresqlLesson3: Lesson = {
     {
       "type": "callout",
       "variant": "prod-danger",
-      "title": "⚠️ Грабли в проде: VACUUM FULL в разгар рабочего дня",
-      "content": "Классическая авария: заметив раздувание таблицы orders на 40 ГБ, инженер выполнил команду VACUUM FULL orders; в 14:00. Команда захватила AccessExclusiveLock. Все входящие заказы клиентов встали в очередь ожидания блокировки, пулы соединений бэкендов мгновенно переполнились, и веб-сайт лег с ошибками 504 Gateway Timeout. Запомните: на живом проде компактизацию проводят строго через pg_repack!"
+      "title": "⚠️ Грабли в проде: SELECT * и скрытый ад TOAST-колонок",
+      "content": "Когда таблица содержит поле description TEXT или payload JSONB на 100 КБ, эти поля лежат в TOAST-таблице на диске. Обычный запрос `SELECT id, status FROM orders` читает только 8 КБ страницу Heap за микросекунды. Но стоит ленивому разработчику написать `SELECT * FROM orders`, как движок PostgreSQL вынужден на КАЖДУЮ строку делать десятки случайных дисковых чтений из TOAST-сегментов, вызывая I/O Throttling и убивая SSD кластера."
     },
     {
       "type": "callout",
       "variant": "interview",
-      "title": "🎯 Спросят на собесе: При каких условиях работает HOT (Heap-Only Tuple) обновление?",
-      "content": "Для успешного применения HOT-обновления требуются строго два условия: 1) Ни одна колонка, по которой построен хотя бы один индекс таблицы, не обновляется в выражении SET; 2) На той же самой 8 КБ странице, где находится текущая версия строки, имеется достаточное количество свободного пространства (Free Space) для размещения нового кортежа. Если места нет или затронут индекс, HOT не срабатывает, и Postgres создает новые записи во всех индексах таблицы."
+      "title": "🎯 Спросят на собесе: Что такое ctid и почему его нельзя использовать как первичный ключ?",
+      "content": "ctid (Current Tuple ID) — это физический адрес версии строки: пара (номер_блока, индекс_строки). Его нельзя использовать в качестве постоянного ключа, потому что при любом UPDATE строка перемещается на новое свободное место на текущей или другой странице, и ctid бесповоротно меняется. Кроме того, операция VACUUM FULL физически перезаписывает все страницы и перемещает кортежи, перетирая все ctid."
     }
   ],
-  "taskDescription": "Перед вами таблица мониторинга состояния таблиц кластера PostgreSQL `table_bloat_monitoring`. Напишите SQL-запрос, который:\n1. Для каждой таблицы рассчитывает процент раздувания мертвыми строками (`bloat_pct`): `(n_dead_tup * 100.0) / (n_live_tup + n_dead_tup)`, округленный до 2 знаков после запятой.\n2. Формирует статус срочности очистки (`vacuum_urgency`):\n   - 'IMMEDIATE_ACTION', если количество мертвых строк превысило порог автовакуума (`n_dead_tup >= autovacuum_threshold`);\n   - 'STABLE', если порог еще не достигнут.\n3. Фильтрует только проблемные таблицы, накопившие не менее 500 000 мертвых строк (`n_dead_tup >= 500000`).\n4. Выводит поля: `relname`, `n_live_tup`, `n_dead_tup`, `bloat_pct`, `vacuum_urgency`.\n5. Сортирует результат по убыванию процента раздувания `bloat_pct`.",
-  "seedCode": "CREATE TABLE table_bloat_monitoring (\n    relname TEXT PRIMARY KEY,\n    n_live_tup INT,\n    n_dead_tup INT,\n    autovacuum_threshold INT,\n    table_size_mb REAL\n);\nINSERT INTO table_bloat_monitoring VALUES ('orders', 10000000, 2800000, 2000050, 4200.0);\nINSERT INTO table_bloat_monitoring VALUES ('users', 5000000, 150000, 1000050, 850.0);\nINSERT INTO table_bloat_monitoring VALUES ('inventory_items', 2000000, 950000, 400050, 980.0);\nINSERT INTO table_bloat_monitoring VALUES ('audit_events', 8000000, 600000, 1600050, 2100.0);",
-  "initialCode": "-- Рассчитайте bloat_pct и определите необходимость запуска vacuum\nSELECT \n    relname,\n    n_live_tup,\n    n_dead_tup,\n    0.0 AS bloat_pct,\n    'STABLE' AS vacuum_urgency\nFROM table_bloat_monitoring;",
-  "solutionCode": "SELECT \n    relname,\n    n_live_tup,\n    n_dead_tup,\n    ROUND((n_dead_tup * 100.0) / (n_live_tup + n_dead_tup), 2) AS bloat_pct,\n    CASE \n        WHEN n_dead_tup >= autovacuum_threshold THEN 'IMMEDIATE_ACTION'\n        ELSE 'STABLE'\n    END AS vacuum_urgency\nFROM table_bloat_monitoring\nWHERE n_dead_tup >= 500000\nORDER BY bloat_pct DESC;",
+  "taskDescription": "Перед вами таблица `table_storage_audit`, хранящая статистику по размерам строк и выравниванию в базе данных DWH. Напишите SQL-запрос, который:\n1. Для каждой таблицы рассчитывает потерянный объем диска из-за неоптимального выравнивания колонок (`wasted_padding_mb`): `((unaligned_row_bytes - aligned_row_bytes) * total_rows) / (1024.0 * 1024.0)`, округленный до 2 знаков после запятой.\n2. Рассчитывает полный физический объем таблицы с учетом данных Heap и TOAST (`total_storage_mb`): `((unaligned_row_bytes * total_rows) + toast_bytes) / (1024.0 * 1024.0)`, округленный до 2 знаков после запятой.\n3. Фильтрует таблицы, у которых потерянный объем `wasted_padding_mb > 10.0`.\n4. Сортирует результат по убыванию `wasted_padding_mb`.",
+  "seedCode": "CREATE TABLE table_storage_audit (\n    table_name TEXT PRIMARY KEY,\n    unaligned_row_bytes INT,\n    aligned_row_bytes INT,\n    total_rows INT,\n    toast_bytes INT\n);\nINSERT INTO table_storage_audit VALUES ('user_profiles', 48, 32, 2000000, 10485760);\nINSERT INTO table_storage_audit VALUES ('audit_logs', 56, 40, 5000000, 0);\nINSERT INTO table_storage_audit VALUES ('product_catalog', 40, 36, 500000, 52428800);\nINSERT INTO table_storage_audit VALUES ('payment_events', 64, 48, 800000, 20971520);",
+  "initialCode": "-- Рассчитайте wasted_padding_mb и total_storage_mb\nSELECT \n    table_name,\n    0.0 AS wasted_padding_mb,\n    0.0 AS total_storage_mb\nFROM table_storage_audit;",
+  "solutionCode": "SELECT \n    table_name,\n    ROUND(((unaligned_row_bytes - aligned_row_bytes) * total_rows) / (1024.0 * 1024.0), 2) AS wasted_padding_mb,\n    ROUND(((unaligned_row_bytes * total_rows) + toast_bytes) / (1024.0 * 1024.0), 2) AS total_storage_mb\nFROM table_storage_audit\nWHERE ROUND(((unaligned_row_bytes - aligned_row_bytes) * total_rows) / (1024.0 * 1024.0), 2) > 10.0\nORDER BY wasted_padding_mb DESC;",
   "testConfig": {
     "checkOrder": true,
     "floatPrecision": 2,
     "requiredAstPatterns": [
       "ROUND",
-      "CASE",
-      "WHEN",
       "WHERE",
       "ORDER BY"
     ]
   },
   "brokenProdTask": {
-    "title": "Инцидент #303: Блокировка прода из-за применения VACUUM FULL в дневное время",
-    "incidentDescription": "Junior-инженер обнаружил Bloat на таблице платежей payments и выполнил VACUUM FULL payments;, что вызвало AccessExclusiveLock и парализовало обработку платежей на 25 минут. Требуется заменить блокирующую команду на безопасную регулярную очистку без эксклюзивной блокировки.",
-    "buggyCode": "VACUUM FULL payments;",
-    "fixHint": "Используйте безопасный неблокирующий VACUUM ANALYZE payments; который собирает статистику и очищает страницы без эксклюзивных блокировок.",
-    "solutionCode": "VACUUM ANALYZE payments;",
+    "title": "Инцидент #301: Деградация I/O аналитического запроса из-за вычитывания TOAST",
+    "incidentDescription": "ETL-пайплайн начал выполняться 40 минут вместо 1 минуты. Анализ запроса выявил вызов SELECT * из таблицы orders_events, где колонка raw_payload JSONB лежала в TOAST и вычитывалась миллионы раз впустую, создав гигантский дисковый I/O.",
+    "buggyCode": "SELECT * FROM orders_events WHERE status = 'COMPLETED';",
+    "fixHint": "Замените SELECT * на выборку только нужных легковесных полей: order_id, customer_id, amount, status.",
+    "solutionCode": "SELECT order_id, customer_id, amount, status FROM orders_events WHERE status = 'COMPLETED';",
     "testConfig": {
       "checkOrder": false,
       "floatPrecision": 2,
       "requiredAstPatterns": [
-        "VACUUM",
-        "ANALYZE",
-        "payments"
+        "SELECT",
+        "order_id",
+        "customer_id",
+        "amount",
+        "status"
       ]
     }
   },
   "hints": [
-    "Формула процента раздувания: ROUND((n_dead_tup * 100.0) / (n_live_tup + n_dead_tup), 2).",
-    "Используйте конструкцию CASE WHEN n_dead_tup >= autovacuum_threshold THEN 'IMMEDIATE_ACTION' ELSE 'STABLE' END.",
-    "Укажите условие WHERE n_dead_tup >= 500000 и выполните сортировку ORDER BY bloat_pct DESC."
+    "Для перевода байт в мегабайты разделите произведение байт и строк на (1024.0 * 1024.0).",
+    "Используйте функцию ROUND(выражение, 2) для округления до сотых долей.",
+    "Примените фильтрацию в условии WHERE для wasted_padding_mb > 10.0 и сортировку ORDER BY wasted_padding_mb DESC."
   ]
 };

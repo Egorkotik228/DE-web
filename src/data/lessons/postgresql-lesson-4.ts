@@ -4,72 +4,80 @@ export const postgresqlLesson4: Lesson = {
   "id": "postgresql-4",
   "moduleSlug": "postgresql",
   "order": 4,
-  "title": "Память и надежность: Shared Buffers, WAL (Write-Ahead Log), Checkpoints и Background Writer",
+  "title": "MVCC, видимость строк (xmin/xmax), снимки (Snapshots) и изоляция транзакций",
   "estimatedMinutes": 40,
   "glossaryTerms": [
     {
-      "term": "shared_buffers",
-      "definition": "Главный пул общей разделяемой оперативной памяти PostgreSQL (обычно 25%–40% RAM сервера), предназначенный для кэширования 8 КБ страниц таблиц и индексов."
+      "term": "MVCC (Multi-Version Concurrency Control)",
+      "definition": "Модель управления параллельным доступом, при которой каждая транзакция видит консистентный срез данных за счет хранения нескольких версий одного и того же кортежа."
     },
     {
-      "term": "WAL (Write-Ahead Log)",
-      "definition": "Журнал опережающей записи на диске (сегменты по 16 МБ), гарантирующий долговечность транзакций (Durability в ACID) за счет строго последовательной записи байт до сброса страниц в таблицы."
+      "term": "Hint Bits (Биты подсказок)",
+      "definition": "Специальные биты в t_infomask кортежа (HEAP_XMIN_COMMITTED, HEAP_XMAX_COMMITTED), кэширующие статус завершения транзакции прямо в строке, избавляя от повторных обращений к clog (pg_xact)."
     },
     {
-      "term": "Checkpoint (Контрольная точка)",
-      "definition": "Процесс принудительного упорядоченного сброса всех «грязных» страниц из shared_buffers на диск и фиксации точки восстановления (REDO Point), позволяющий удалять старые сегменты WAL."
+      "term": "Snapshot (Снимок данных)",
+      "definition": "Структура данных в памяти вида xmin:xmax:xip_list, фиксирующая минимальный и максимальный номер активных транзакций в момент начала запроса или транзакции."
     },
     {
-      "term": "Full Page Writes (FPW)",
-      "definition": "Механизм защиты от частичной записи страниц (Torn Pages): при первом изменении страницы после чекпоинта ее образ размером 8 КБ целиком записывается в WAL."
+      "term": "Transaction ID Wraparound",
+      "definition": "Критическая аварийная ситуация переполнения 32-битного счетчика транзакций (4.2 млрд XID), при которой старые строки могут внезапно стать невидимыми."
     }
   ],
   "schemaPreview": [
     {
-      "tableName": "buffer_cache_stats",
+      "tableName": "transaction_activity_monitor",
       "columns": [
         {
-          "name": "relname",
-          "type": "TEXT",
+          "name": "pid",
+          "type": "INTEGER",
           "keyType": "PK"
         },
         {
-          "name": "heap_blks_read",
+          "name": "usename",
+          "type": "TEXT"
+        },
+        {
+          "name": "state",
+          "type": "TEXT"
+        },
+        {
+          "name": "duration_seconds",
           "type": "INTEGER"
         },
         {
-          "name": "heap_blks_hit",
-          "type": "INTEGER"
-        },
-        {
-          "name": "dirty_buffers",
+          "name": "xmin_horizon_age",
           "type": "INTEGER"
         }
       ],
       "sampleRows": [
         {
-          "relname": "orders",
-          "heap_blks_read": 45000,
-          "heap_blks_hit": 855000,
-          "dirty_buffers": 1200
+          "pid": 4821,
+          "usename": "etl_worker",
+          "state": "idle in transaction",
+          "duration_seconds": 380,
+          "xmin_horizon_age": 450000
         },
         {
-          "relname": "users",
-          "heap_blks_read": 2000,
-          "heap_blks_hit": 498000,
-          "dirty_buffers": 80
+          "pid": 4822,
+          "usename": "analytics_dwh",
+          "state": "active",
+          "duration_seconds": 120,
+          "xmin_horizon_age": 120000
         },
         {
-          "relname": "click_events",
-          "heap_blks_read": 720000,
-          "heap_blks_hit": 280000,
-          "dirty_buffers": 5400
+          "pid": 4823,
+          "usename": "web_api",
+          "state": "idle",
+          "duration_seconds": 5,
+          "xmin_horizon_age": 0
         },
         {
-          "relname": "catalog_categories",
-          "heap_blks_read": 50,
-          "heap_blks_hit": 15000,
-          "dirty_buffers": 5
+          "pid": 4824,
+          "usename": "bi_dashboard",
+          "state": "idle in transaction",
+          "duration_seconds": 75,
+          "xmin_horizon_age": 85000
         }
       ]
     }
@@ -77,62 +85,62 @@ export const postgresqlLesson4: Lesson = {
   "theoryBlocks": [
     {
       "type": "markdown",
-      "content": "### Архитектура памяти PostgreSQL: Общие буферы и память процессов\n\nМодель памяти PostgreSQL разделена на две фундаментальные зоны:\n1. **Общая память (Shared Memory):** Доступна всем процессам кластера. Главный компонент — `shared_buffers` (по умолчанию всего 128 МБ, в проде выделяют 25%–40% от всей оперативной памяти хоста). Здесь кэшируются 8-килобайтные страницы таблиц и индексов. Другие компоненты: `wal_buffers` (16–64 МБ) и таблицы блокировок (`lock table`).\n2. **Локальная память процесса (Local Memory):** Выделяется индивидуально каждому подключению backend-воркера:\n   - `work_mem`: Память для операций сортировки (`ORDER BY`), построения хэш-таблиц (`Hash Join`, `HashAggregate`) и оконных функций.\n   - `maintenance_work_mem`: Память для утилитных задач (`CREATE INDEX`, `VACUUM`, добавление внешних ключей).\n   - `temp_buffers`: Хранение временных таблиц сессии.\n\n#### Ловушка work_mem и Linux OOM Killer\nСамая опасная ошибка начинающего DBA — установить `work_mem = 1GB` в глобальном конфиге `postgresql.conf`.\nПараметр `work_mem` выделяется **не на сессию и не на запрос**, а **на каждый отдельный узел плана выполнения (Execution Plan Node)**!\nЕсли сложный аналитический запрос выполняет 4 операции сортировки и 3 хэш-джойна, он может аллоцировать `7 * 1GB = 7 ГБ RAM` в рамках одного запроса! При 50 одновременных пользователях сервер мгновенно расходует всю память и принудительно убивается ядром Linux (**SIGKILL, exit code 137**).\n\n#### Алгоритм Clock Sweep: Вытеснение страниц из shared_buffers\nКогда с диска нужно прочитать новую 8 КБ страницу, а в `shared_buffers` нет свободного места, СУБД использует алгоритм **Clock Sweep (часовой алгоритм)**:\n- Каждому буферу сопоставлен счетчик использования `usage_count` (число от 0 до 5).\n- Виртуальная стрелка часов обходит массив буферов по кругу:\n  - Если у страницы `usage_count > 0`, стрелка декрементирует его на 1 и идет дальше.\n  - Если `usage_count == 0` и страница не заблокирована, она выбирается жертвой на вытеснение.\n\n#### Журнал упреждающей записи (WAL) и гарантия Durability\nЕсли бы при каждом коммите сервер сбрасывал случайные 8 КБ страницы данных в файлы таблиц на диске, СУБД не могла бы обрабатывать больше 100–200 транзакций в секунду из-за случайного дискового I/O (Random I/O).\n\nPostgreSQL реализует принцип **WAL (Write-Ahead Logging)**:\n1. При изменении строки меняется 8 КБ страница в оперативной памяти (`shared_buffers`), она становится **«грязной» (dirty page)**.\n2. В компактный последовательный журнал **WAL** записывается бинарный diff изменений.\n3. При выполнении команды `COMMIT` СУБД гарантирует сброс на диск (через системный вызов `fsync`) **ТОЛЬКО записи WAL**! Это быстрый последовательный синхронный I/O. Пользователь получает ответ «OK», хотя сама таблица на диске еще не обновлена.\n\n#### Чекпоинты (Checkpoints), Background Writer и Full Page Writes\nКто и когда сбрасывает грязные страницы из `shared_buffers` на диск?\n1. **Checkpointer (Контрольная точка):** По таймеру (`checkpoint_timeout = 15min`) или объему накопившегося WAL (`max_wal_size = 16GB-64GB`) сбрасывает все накопившиеся грязные страницы на диск. Параметр `checkpoint_completion_target = 0.9` размазывает запись на 90% интервала, устраняя всплески дисковой нагрузки (I/O spikes).\n2. **Background Writer (bgwriter):** В непрерывном режиме сбрасывает небольшие порции грязных страниц чуть впереди стрелки Clock Sweep, чтобы у читающих процессов всегда были готовые чистые буферы.\n3. **Backend Writes (buffers_backend):** Худший сценарий. Если bgwriter не успевает, сам клиентский процесс останавливает выполнение своего SQL-запроса и лично сбрасывает чужую грязную страницу на диск. Рост `buffers_backend` — маркер критической нехватки дисковой подсистемы.\n4. **Full Page Writes (FPW):** Защита от повреждения блоков при сбое питания (Torn Pages). Если сервер выключится ровно посередине записи 8 КБ страницы, блок будет разрушен. Поэтому при первом изменении страницы после чекпоинта весь ее образ целиком сохраняется в WAL."
+      "content": "### Физика MVCC в PostgreSQL: почему чтение никогда не блокирует запись\n\nВ традиционных блокировочных СУБД (2PL — Two-Phase Locking) читающий запрос ставит разделяемую блокировку (`Shared Lock`), запрещая изменение строк до конца транзакции, а пишущий запрос полностью блокирует читателей. Это приводило к взаимным блокировкам (Deadlocks) и деградации производительности.\n\nВ архитектуре PostgreSQL реализована многоверсионность **MVCC (Multi-Version Concurrency Control)**: каждый раз, когда строка изменяется, СУБД сохраняет физически новую версию строки в таблице (Heap), не перетирая старые значения.\n\n#### Поля заголовка xmin и xmax\nКаждая версия строки несет в своем заголовке системные атрибуты:\n1. `t_xmin` (4 байта): идентификатор транзакции (XID), которая выполнила `INSERT` этой версии.\n2. `t_xmax` (4 байта): идентификатор транзакции, которая выполнила `DELETE` или `UPDATE` этой версии (для живой актуальной строки `xmax = 0`).\n\n```text\n-- Исходная строка\nTuple 1: [xmin = 100, xmax = 0] (id = 1, balance = 1000)\n\n-- Выполняем UPDATE account SET balance = 1200 WHERE id = 1 (в транзакции 105)\nTuple 1 (старая): [xmin = 100, xmax = 105] (помечена удаленной для будущих транзакций)\nTuple 2 (новая):  [xmin = 105, xmax = 0]   (id = 1, balance = 1200, новая версия в куче)\n```\n\nПри операции `DELETE` строка физически **не удаляется со страницы**! В ней всего лишь выставляется `xmax = current_xid`. До тех пор, пока процесс `VACUUM` не освободит место, мертвый кортеж продолжает занимать место на 8-килобайтной странице.\n\n#### Биты подсказок (Hint Bits) и парадокс «пишущего SELECT»\nКогда транзакция читает кортеж, ей нужно знать: зафиксирована ли транзакция `xmin` (`COMMIT`) или откатана (`ROLLBACK`)? Эта информация лежит в системном журнале статусов транзакций **clog (pg_xact)**.\n\nОбращение к `pg_xact` на каждую строчку миллионов записей вызвало бы катастрофический bottleneck по блокировкам кэша. Поэтому PostgreSQL использует оптимизацию **Hint Bits (биты подсказок)** в поле `t_infomask`:\n- `HEAP_XMIN_COMMITTED`: транзакция xmin точно успешно завершена.\n- `HEAP_XMIN_INVALID`: транзакция xmin была откатана (rollback).\n\n**Парадокс:** Когда вы только что загрузили 10 миллионов строк через `COPY` или быстрый `INSERT`, биты подсказок еще не проставлены. Самый первый запрос `SELECT * FROM table` обращается к clog, определяет статус транзакции и **прямо во время чтения записывает Hint Bits в заголовок строк** в оперативной памяти `shared_buffers`! Страницы помечаются как «грязные» (dirty), и фоновый процесс фоновой записи (Checkpointer / BgWriter) сбрасывает их на диск. Таким образом, в PostgreSQL обычный `SELECT` может генерировать сотни мегабайт дисковой записи!\n\n#### Снимки данных (Snapshots) и уровни изоляции\nСнимок транзакции описывается структурой `xmin:xmax:xip_list`:\n- `xmin`: наименьший XID транзакции, которая еще была активна на момент создания снимка. Все транзакции `< xmin` считаются гарантированно завершенными.\n- `xmax`: первый еще не выданный номер транзакции на момент снимка. Все транзакции `>= xmax` невидимы.\n- `xip_list`: список активных транзакций между `xmin` и `xmax`.\n\nУровни изоляции в PostgreSQL:\n- **Read Committed (по умолчанию):** Снимок пересоздается **перед каждым SQL-запросом**. Вы видите изменения, закоммиченные между запросами внутри одной транзакции (возможно появление Non-repeatable reads).\n- **Repeatable Read:** Снимок создается **один раз в начале транзакции** (перед первой командой). Все последующие запросы видят мир, замерзший на момент старта транзакции.\n- **Serializable:** Полная изоляция через SSI (Serializable Snapshot Isolation) с графом зависимостей чтения/записи (SIREAD-блокировки в памяти). Предотвращает Write Skew без блокировки строк."
     },
     {
       "type": "callout",
       "variant": "analogy",
-      "title": "💡 На пальцах: Блокнот официанта и повара на кухне",
-      "content": "WAL — это блокнот официанта в переполненном ресторане. Принимая заказ, официант за секунду черкает три слова в блокнот (быстрый последовательный лог WAL) и отдает вам чек: «Ваш заказ принят!» (COMMIT). Если в зале погаснет свет, по блокноту точно восстановят, кто что заказал. А приготовление блюд и мытье посуды (Checkpointer и bgwriter) спокойно идет на кухне в фоновом режиме: повара не ждут, пока вы доедите, чтобы принять заказ у следующего столика."
+      "title": "💡 На пальцах: Моментальный снимок площади",
+      "content": "Снимок (Snapshot) — это как моментальная фотография оживленной городской площади. Когда затвор фотоаппарата щелкнул (стартовал запрос или транзакция), на снимке зафиксированы только те люди, которые уже зашли на площадь (xmin committed). Те, кто еще только открывал дверь кафе (активные транзакции в xip_list), на фото выглядят полупрозрачными силуэтами и не учитываются. А те, кто прибежит через секунду после щелчка затвора, на снимок не попадут вовсе, даже если вы будете разглядывать фотографию целый час."
     },
     {
       "type": "before-after-table",
       "data": {
-        "title": "Сравнение дефолтной и промышленной Highload конфигурации памяти PostgreSQL",
-        "beforeDescription": "Дефолтные устаревшие настройки PostgreSQL из коробки",
+        "title": "Сравнение феноменов аномалий на уровнях изоляции в PostgreSQL",
+        "beforeDescription": "Стандартный уровень изоляции по умолчанию в PostgreSQL",
         "beforeColumns": [
-          "Параметр памяти / WAL",
-          "Дефолтная конфигурация",
-          "Промышленный Highload тюнинг"
+          "Уровень изоляции",
+          "Неповторяемое чтение (Non-repeatable read)",
+          "Фантомные строки (Phantom Read)"
         ],
         "beforeRows": [
           [
-            "shared_buffers",
-            "128 МБ (рудимент старых ОС)",
-            "25% – 40% всей оперативной памяти"
+            "Read Committed",
+            "Возможно (данные меняются между SELECT)",
+            "Возможно (новые строки видны)"
           ],
           [
-            "max_wal_size и completion",
-            "1 ГБ и target = 0.5 (пилы I/O)",
-            "16–64 ГБ и target = 0.9 (размазывание)"
+            "Repeatable Read",
+            "Защищено (снимок заморожен на старте)",
+            "Защищено в Postgres через MVCC"
           ],
           [
-            "work_mem контроль",
-            "4 МБ (spill на диск в temp)",
-            "32–64 МБ с мониторингом соединений"
+            "Serializable",
+            "Защищено (SSI предикатные блокировки)",
+            "Защищено (полная эмуляция порядка)"
           ]
         ],
-        "afterDescription": "Оптимальная архитектура для высоконагруженных DWH и OLTP систем",
+        "afterDescription": "Строгие уровни изоляции для финансовых и транзакционных сценариев",
         "afterColumns": [
-          "Параметр памяти / WAL",
-          "Дефолтная конфигурация",
-          "Промышленный Highload тюнинг"
+          "Уровень изоляции",
+          "Неповторяемое чтение (Non-repeatable read)",
+          "Фантомные строки (Phantom Read)"
         ],
         "afterRows": [
           [
-            "shared_buffers",
-            "128 МБ (рудимент старых ОС)",
-            "25% – 40% всей оперативной памяти"
+            "Read Committed",
+            "Возможно (данные меняются между SELECT)",
+            "Возможно (новые строки видны)"
           ],
           [
-            "max_wal_size и completion",
-            "1 ГБ и target = 0.5 (пилы I/O)",
-            "16–64 ГБ и target = 0.9 (размазывание)"
+            "Repeatable Read",
+            "Защищено (снимок заморожен на старте)",
+            "Защищено в Postgres через MVCC"
           ],
           [
-            "work_mem контроль",
-            "4 МБ (spill на диск в temp)",
-            "32–64 МБ с мониторингом соединений"
+            "Serializable",
+            "Защищено (SSI предикатные блокировки)",
+            "Защищено (полная эмуляция порядка)"
           ]
         ]
       }
@@ -140,25 +148,24 @@ export const postgresqlLesson4: Lesson = {
     {
       "type": "callout",
       "variant": "prod-danger",
-      "title": "⚠️ Грабли в проде: Лавина Full Page Writes из-за маленького max_wal_size",
-      "content": "Если оставить дефолтный max_wal_size = 1GB на активной базе, чекпоинты начинают происходить каждые 30 секунд. При каждом чекпоинте сбрасывается флаг, и следующее изменение КАЖДОЙ страницы вызывает запись полных 8 КБ в WAL (Full Page Writes). В результате объем генерируемого WAL подскакивает в 5–10 раз, дисковая полка раскаляется до 100% утилизации, а репликация отстает на часы."
+      "title": "⚠️ Грабли в проде: Зависшая транзакция (Idle in Transaction) и Wraparound авария",
+      "content": "Если аналитик или бэкенд открыл транзакцию `BEGIN;` и завис в состоянии `idle in transaction`, его снимок удерживает горизонт чистки `xmin`. Фоновый процесс AUTOVACUUM не имеет права удалять мертвые строки, созданные позже этой точки! За считанные часы таблицы раздуваются в 10 раз. Но худшее — счетчик XID приближается к 2^31 (лимит Wraparound). Когда до катастрофы остается 10 млн XID, PostgreSQL принудительно выключается в режим аварийного readonly и перестает принимать любые записи от клиентов!"
     },
     {
       "type": "callout",
       "variant": "interview",
-      "title": "🎯 Спросят на собесе: Что физически происходит на диске при выполнении COMMIT?",
-      "content": "При выполнении команды COMMIT сервер PostgreSQL: 1) Генерирует в wal_buffers специальную запись commit record; 2) Вызывает системный вызов fsync() для сброса WAL-буфера на диск до физического энергонезависимого накопителя; 3) Помечает транзакцию зафиксированной в clog (pg_xact); 4) Освобождает удерживаемые блокировки heavyweight locks; 5) Возвращает клиенту подтверждение успешного коммита. Сами страницы данных в shared_buffers на диск НЕ сбрасываются — они будут записаны позже асинхронно Checkpointer или bgwriter."
+      "title": "🎯 Спросят на собесе: Почему UPDATE в Postgres не делает блокировку на чтение, но создает нагрузку на дисковые индексы?",
+      "content": "Потому что читатели обращаются к старой версии строки (которая остается неизменной), сверяя xmax со своим снимком. Однако при создании новой версии строки создается новый ctid. Если обновленная колонка входит хотя бы в один индекс (или если на странице нет места для HOT-обновления), PostgreSQL обязан обновить записи во ВСЕХ индексах таблицы, многократно умножая write amplification."
     }
   ],
-  "taskDescription": "Перед вами таблица `buffer_cache_stats`, собирающая метрики чтения из оперативной памяти (`heap_blks_hit`) и физических чтений с диска (`heap_blks_read`) по таблицам кластера. Для оценки качества кэширования в `shared_buffers` напишите SQL-запрос, который:\n1. Для каждой таблицы рассчитывает коэффициент попадания в кэш (`cache_hit_ratio`): `(heap_blks_hit * 100.0) / (heap_blks_hit + heap_blks_read)`, округленный до 2 знаков после запятой.\n2. Формирует статус эффективности кэширования (`cache_status`):\n   - 'OPTIMAL', если `cache_hit_ratio >= 95.0`;\n   - 'NEEDS_TUNING', если показатель ниже 95%.\n3. Фильтрует только достаточно нагруженные таблицы с суммарным числом обращений к блокам не менее 100 000 (`(heap_blks_hit + heap_blks_read) >= 100000`).\n4. Выводит поля: `relname`, `heap_blks_read`, `heap_blks_hit`, `cache_hit_ratio`, `cache_status`.\n5. Сортирует результат по убыванию количества дисковых чтений `heap_blks_read`.",
-  "seedCode": "CREATE TABLE buffer_cache_stats (\n    relname TEXT PRIMARY KEY,\n    heap_blks_read INT,\n    heap_blks_hit INT,\n    dirty_buffers INT\n);\nINSERT INTO buffer_cache_stats VALUES ('orders', 45000, 855000, 1200);\nINSERT INTO buffer_cache_stats VALUES ('users', 2000, 498000, 80);\nINSERT INTO buffer_cache_stats VALUES ('click_events', 720000, 280000, 5400);\nINSERT INTO buffer_cache_stats VALUES ('catalog_categories', 50, 15000, 5);\nINSERT INTO buffer_cache_stats VALUES ('temp_logs', 90000, 60000, 400);",
-  "initialCode": "-- Рассчитайте cache_hit_ratio и определите статус кэширования таблиц\nSELECT \n    relname,\n    heap_blks_read,\n    heap_blks_hit,\n    0.0 AS cache_hit_ratio,\n    'OPTIMAL' AS cache_status\nFROM buffer_cache_stats;",
-  "solutionCode": "SELECT \n    relname,\n    heap_blks_read,\n    heap_blks_hit,\n    ROUND((heap_blks_hit * 100.0) / (heap_blks_hit + heap_blks_read), 2) AS cache_hit_ratio,\n    CASE \n        WHEN ROUND((heap_blks_hit * 100.0) / (heap_blks_hit + heap_blks_read), 2) >= 95.0 THEN 'OPTIMAL'\n        ELSE 'NEEDS_TUNING'\n    END AS cache_status\nFROM buffer_cache_stats\nWHERE (heap_blks_hit + heap_blks_read) >= 100000\nORDER BY heap_blks_read DESC;",
+  "taskDescription": "Перед вами таблица мониторинга сессий PostgreSQL `transaction_activity_monitor`. Для предотвращения зависания очистки MVCC и угрозы переполнения счетчика транзакций (Wraparound) напишите SQL-запрос, который:\n1. Отбирает подозрительные сессии в состоянии `idle in transaction` или `active`, работающие не менее 60 секунд (`duration_seconds >= 60`).\n2. Формирует категорию опасности `severity`:\n   - 'CRITICAL', если `duration_seconds >= 300`;\n   - 'WARNING', если `duration_seconds < 300`.\n3. Выбирает колонки: `pid`, `usename`, `state`, `duration_seconds`, `severity`.\n4. Сортирует результат по убыванию длительности `duration_seconds`.",
+  "seedCode": "CREATE TABLE transaction_activity_monitor (\n    pid INT PRIMARY KEY,\n    usename TEXT,\n    state TEXT,\n    duration_seconds INT,\n    xmin_horizon_age INT\n);\nINSERT INTO transaction_activity_monitor VALUES (4821, 'etl_worker', 'idle in transaction', 380, 450000);\nINSERT INTO transaction_activity_monitor VALUES (4822, 'analytics_dwh', 'active', 120, 120000);\nINSERT INTO transaction_activity_monitor VALUES (4823, 'web_api', 'idle', 5, 0);\nINSERT INTO transaction_activity_monitor VALUES (4824, 'bi_dashboard', 'idle in transaction', 75, 85000);\nINSERT INTO transaction_activity_monitor VALUES (4825, 'reporting_svc', 'idle in transaction', 20, 10000);",
+  "initialCode": "-- Выявите опасные транзакции, блокирующие очистку MVCC\nSELECT \n    pid,\n    usename,\n    state,\n    duration_seconds,\n    'WARNING' AS severity\nFROM transaction_activity_monitor;",
+  "solutionCode": "SELECT \n    pid,\n    usename,\n    state,\n    duration_seconds,\n    CASE \n        WHEN duration_seconds >= 300 THEN 'CRITICAL'\n        ELSE 'WARNING'\n    END AS severity\nFROM transaction_activity_monitor\nWHERE state IN ('idle in transaction', 'active')\n  AND duration_seconds >= 60\nORDER BY duration_seconds DESC;",
   "testConfig": {
     "checkOrder": true,
     "floatPrecision": 2,
     "requiredAstPatterns": [
-      "ROUND",
       "CASE",
       "WHEN",
       "WHERE",
@@ -166,23 +173,22 @@ export const postgresqlLesson4: Lesson = {
     ]
   },
   "brokenProdTask": {
-    "title": "Инцидент #304: Замедление аналитического запроса из-за сброса сортировки на диск (Work_mem Spill)",
-    "incidentDescription": "Сложный аналитический запрос начал выполняться 45 секунд. В плане EXPLAIN ANALYZE виден узел: Sort Method: external merge Disk: 48000kB, что означает нехватку work_mem и сброс промежуточных данных во временные файлы на диск. Требуется локально в рамках сессии увеличить лимит рабочей памяти до 64MB для ускорения вычислений в RAM.",
-    "buggyCode": "SELECT customer_id, SUM(amount) FROM payments GROUP BY customer_id ORDER BY SUM(amount) DESC;",
-    "fixHint": "Добавьте команду SET work_mem = '64MB'; перед выполнением аналитического запроса.",
-    "solutionCode": "SET work_mem = '64MB'; SELECT customer_id, SUM(amount) FROM payments GROUP BY customer_id ORDER BY SUM(amount) DESC;",
+    "title": "Инцидент #302: Скрипт мониторинга пропускает зависшие транзакции",
+    "incidentDescription": "Скрипт алерта отслеживал только состояние 'active', пропуская опаснейшее состояние 'idle in transaction', из-за чего зависшая сессия заблокировала очистку таблицы на 6 часов и вызвала Bloat на 120 ГБ.",
+    "buggyCode": "SELECT pid, usename, duration_seconds FROM transaction_activity_monitor WHERE state = 'active' AND duration_seconds > 60;",
+    "fixHint": "Добавьте проверку состояния 'idle in transaction' через оператор IN ('active', 'idle in transaction').",
+    "solutionCode": "SELECT pid, usename, duration_seconds FROM transaction_activity_monitor WHERE state IN ('active', 'idle in transaction') AND duration_seconds > 60;",
     "testConfig": {
       "checkOrder": false,
       "floatPrecision": 2,
       "requiredAstPatterns": [
-        "work_mem",
-        "64MB"
+        "idle in transaction"
       ]
     }
   },
   "hints": [
-    "Формула коэффициента попадания: ROUND((heap_blks_hit * 100.0) / (heap_blks_hit + heap_blks_read), 2).",
-    "Используйте CASE WHEN расчетное_значение >= 95.0 THEN 'OPTIMAL' ELSE 'NEEDS_TUNING' END AS cache_status.",
-    "Отфильтруйте таблицы условием (heap_blks_hit + heap_blks_read) >= 100000 и выполните сортировку ORDER BY heap_blks_read DESC."
+    "Используйте конструкцию CASE WHEN duration_seconds >= 300 THEN 'CRITICAL' ELSE 'WARNING' END AS severity.",
+    "Отфильтруйте состояния через state IN ('idle in transaction', 'active') и длительность duration_seconds >= 60.",
+    "Упорядочите вывод по убыванию времени работы: ORDER BY duration_seconds DESC."
   ]
 };

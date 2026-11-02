@@ -4,80 +4,61 @@ export const postgresqlLesson2: Lesson = {
   "id": "postgresql-2",
   "moduleSlug": "postgresql",
   "order": 2,
-  "title": "MVCC, видимость строк (xmin/xmax), снимки (Snapshots) и изоляция транзакций",
-  "estimatedMinutes": 40,
+  "title": "Типы данных PostgreSQL с нуля: Числа (NUMERIC vs FLOAT), даты (TIMESTAMPTZ), JSONB и UUID v4 vs UUID v7",
+  "estimatedMinutes": 35,
   "glossaryTerms": [
     {
-      "term": "MVCC (Multi-Version Concurrency Control)",
-      "definition": "Модель управления параллельным доступом, при которой каждая транзакция видит консистентный срез данных за счет хранения нескольких версий одного и того же кортежа."
+      "term": "NUMERIC / DECIMAL",
+      "definition": "Числовой тип с произвольной точностью без погрешностей стандартов IEEE 754. Хранится в десятичном виде с переменной длиной."
     },
     {
-      "term": "Hint Bits (Биты подсказок)",
-      "definition": "Специальные биты в t_infomask кортежа (HEAP_XMIN_COMMITTED, HEAP_XMAX_COMMITTED), кэширующие статус завершения транзакции прямо в строке, избавляя от повторных обращений к clog (pg_xact)."
+      "term": "TIMESTAMPTZ",
+      "definition": "Тип даты и времени, сохраняющий переданное значение в UTC и конвертирующий его в таймзону клиентской сессии при чтении."
     },
     {
-      "term": "Snapshot (Снимок данных)",
-      "definition": "Структура данных в памяти вида xmin:xmax:xip_list, фиксирующая минимальный и максимальный номер активных транзакций в момент начала запроса или транзакции."
+      "term": "JSONB",
+      "definition": "Бинарное декомпозированное представление JSON в PostgreSQL с поддержкой индексов GIN, мгновенного поиска по ключам и отсутствием дубликатов."
     },
     {
-      "term": "Transaction ID Wraparound",
-      "definition": "Критическая аварийная ситуация переполнения 32-битного счетчика транзакций (4.2 млрд XID), при которой старые строки могут внезапно стать невидимыми."
+      "term": "UUID v7",
+      "definition": "Спецификация UUID с временным префиксом (Time-ordered), обеспечивающая последовательную вставку в B-Tree без фрагментации страниц."
     }
   ],
   "schemaPreview": [
     {
-      "tableName": "transaction_activity_monitor",
+      "tableName": "invoices",
+      "description": "Финансовые инвойсы с бинарными метаданными и временными метками",
       "columns": [
         {
-          "name": "pid",
-          "type": "INTEGER",
+          "name": "invoice_id",
+          "type": "INT",
           "keyType": "PK"
         },
         {
-          "name": "usename",
+          "name": "client_uuid",
+          "type": "VARCHAR(36)",
+          "keyType": "INDEX"
+        },
+        {
+          "name": "total_rub",
+          "type": "NUMERIC(12,2)"
+        },
+        {
+          "name": "metadata_json",
           "type": "TEXT"
         },
         {
-          "name": "state",
-          "type": "TEXT"
-        },
-        {
-          "name": "duration_seconds",
-          "type": "INTEGER"
-        },
-        {
-          "name": "xmin_horizon_age",
-          "type": "INTEGER"
+          "name": "created_at",
+          "type": "TIMESTAMP"
         }
       ],
       "sampleRows": [
         {
-          "pid": 4821,
-          "usename": "etl_worker",
-          "state": "idle in transaction",
-          "duration_seconds": 380,
-          "xmin_horizon_age": 450000
-        },
-        {
-          "pid": 4822,
-          "usename": "analytics_dwh",
-          "state": "active",
-          "duration_seconds": 120,
-          "xmin_horizon_age": 120000
-        },
-        {
-          "pid": 4823,
-          "usename": "web_api",
-          "state": "idle",
-          "duration_seconds": 5,
-          "xmin_horizon_age": 0
-        },
-        {
-          "pid": 4824,
-          "usename": "bi_dashboard",
-          "state": "idle in transaction",
-          "duration_seconds": 75,
-          "xmin_horizon_age": 85000
+          "invoice_id": 1,
+          "client_uuid": "018f4a12-7000-7abc",
+          "total_rub": 154000.5,
+          "metadata_json": "{\"source\":\"web\",\"tax_rate\":0.2}",
+          "created_at": "2026-11-01 10:00:00"
         }
       ]
     }
@@ -85,62 +66,62 @@ export const postgresqlLesson2: Lesson = {
   "theoryBlocks": [
     {
       "type": "markdown",
-      "content": "### Физика MVCC в PostgreSQL: почему чтение никогда не блокирует запись\n\nВ традиционных блокировочных СУБД (2PL — Two-Phase Locking) читающий запрос ставит разделяемую блокировку (`Shared Lock`), запрещая изменение строк до конца транзакции, а пишущий запрос полностью блокирует читателей. Это приводило к взаимным блокировкам (Deadlocks) и деградации производительности.\n\nВ архитектуре PostgreSQL реализована многоверсионность **MVCC (Multi-Version Concurrency Control)**: каждый раз, когда строка изменяется, СУБД сохраняет физически новую версию строки в таблице (Heap), не перетирая старые значения.\n\n#### Поля заголовка xmin и xmax\nКаждая версия строки несет в своем заголовке системные атрибуты:\n1. `t_xmin` (4 байта): идентификатор транзакции (XID), которая выполнила `INSERT` этой версии.\n2. `t_xmax` (4 байта): идентификатор транзакции, которая выполнила `DELETE` или `UPDATE` этой версии (для живой актуальной строки `xmax = 0`).\n\n```text\n-- Исходная строка\nTuple 1: [xmin = 100, xmax = 0] (id = 1, balance = 1000)\n\n-- Выполняем UPDATE account SET balance = 1200 WHERE id = 1 (в транзакции 105)\nTuple 1 (старая): [xmin = 100, xmax = 105] (помечена удаленной для будущих транзакций)\nTuple 2 (новая):  [xmin = 105, xmax = 0]   (id = 1, balance = 1200, новая версия в куче)\n```\n\nПри операции `DELETE` строка физически **не удаляется со страницы**! В ней всего лишь выставляется `xmax = current_xid`. До тех пор, пока процесс `VACUUM` не освободит место, мертвый кортеж продолжает занимать место на 8-килобайтной странице.\n\n#### Биты подсказок (Hint Bits) и парадокс «пишущего SELECT»\nКогда транзакция читает кортеж, ей нужно знать: зафиксирована ли транзакция `xmin` (`COMMIT`) или откатана (`ROLLBACK`)? Эта информация лежит в системном журнале статусов транзакций **clog (pg_xact)**.\n\nОбращение к `pg_xact` на каждую строчку миллионов записей вызвало бы катастрофический bottleneck по блокировкам кэша. Поэтому PostgreSQL использует оптимизацию **Hint Bits (биты подсказок)** в поле `t_infomask`:\n- `HEAP_XMIN_COMMITTED`: транзакция xmin точно успешно завершена.\n- `HEAP_XMIN_INVALID`: транзакция xmin была откатана (rollback).\n\n**Парадокс:** Когда вы только что загрузили 10 миллионов строк через `COPY` или быстрый `INSERT`, биты подсказок еще не проставлены. Самый первый запрос `SELECT * FROM table` обращается к clog, определяет статус транзакции и **прямо во время чтения записывает Hint Bits в заголовок строк** в оперативной памяти `shared_buffers`! Страницы помечаются как «грязные» (dirty), и фоновый процесс фоновой записи (Checkpointer / BgWriter) сбрасывает их на диск. Таким образом, в PostgreSQL обычный `SELECT` может генерировать сотни мегабайт дисковой записи!\n\n#### Снимки данных (Snapshots) и уровни изоляции\nСнимок транзакции описывается структурой `xmin:xmax:xip_list`:\n- `xmin`: наименьший XID транзакции, которая еще была активна на момент создания снимка. Все транзакции `< xmin` считаются гарантированно завершенными.\n- `xmax`: первый еще не выданный номер транзакции на момент снимка. Все транзакции `>= xmax` невидимы.\n- `xip_list`: список активных транзакций между `xmin` и `xmax`.\n\nУровни изоляции в PostgreSQL:\n- **Read Committed (по умолчанию):** Снимок пересоздается **перед каждым SQL-запросом**. Вы видите изменения, закоммиченные между запросами внутри одной транзакции (возможно появление Non-repeatable reads).\n- **Repeatable Read:** Снимок создается **один раз в начале транзакции** (перед первой командой). Все последующие запросы видят мир, замерзший на момент старта транзакции.\n- **Serializable:** Полная изоляция через SSI (Serializable Snapshot Isolation) с графом зависимостей чтения/записи (SIREAD-блокировки в памяти). Предотвращает Write Skew без блокировки строк."
+      "content": "### Анатомия типов данных PostgreSQL\n\nВыбор типов данных в PostgreSQL определяет объем дискового пространства, скорость сканирования индексов и корректность математических операций.\n\n#### 1. Числа: NUMERIC против FLOAT (DOUBLE PRECISION)\n* **`FLOAT` / `DOUBLE PRECISION`:** Вычисляется аппаратно на процессоре (FPU). Работает максимально быстро, но не гарантирует точного десятичного представления (`0.1 + 0.2 = 0.30000000000000004`). В финансовых расчетах запрещен.\n* **`NUMERIC(precision, scale)`:** Хранит цифры десятично в памяти. Вычисления производятся программно. Гарантирует абсолютную точность для биллинга.\n\n#### 2. Даты и таймзоны: TIMESTAMP vs TIMESTAMPTZ\n* **`TIMESTAMP` (без таймзоны):** «Наивная» дата. Если сервер в Москве запишет `12:00`, а клиент в Лондоне прочитает ее, Лондон увидит `12:00` (хотя реальная разница 3 часа).\n* **`TIMESTAMPTZ`:** Всегда нормализует значение к **UTC** при записи, а при выдаче клиенту пересчитывает в `TIME ZONE` текущей сессии.\n\n#### 3. Полуструктурированные данные: JSON vs JSONB\n* **`JSON`:** Хранит исходный текст как есть (включая пробелы и дубликаты ключей). При каждом обращении требует полного повторного парсинга строки.\n* **`JSONB`:** Бинарное разобранное дерево. Вставка чуть медленнее, но чтение и поиск по ключам `->`, `->>`, оператор вхождения `@>` работают за доли миллисекунды и поддерживают **GIN-индексы**.\n\n#### 4. Идентификаторы: UUID v4 против UUID v7\n* **UUID v4 (Random):** Случайное распределение байт. При вставке в B-Tree индекс попадает в случайные блоки по всему дереву, вызывая **Page Splits** (дробление страниц) и деградацию кэша `shared_buffers`.\n* **UUID v7 (Time-ordered):** Первые 48 бит содержат Unix Timestamp в миллисекундах. Значения монотонно возрастают, как автоинкремент, предотвращая фрагментацию индексов."
     },
     {
       "type": "callout",
       "variant": "analogy",
-      "title": "💡 На пальцах: Моментальный снимок площади",
-      "content": "Снимок (Snapshot) — это как моментальная фотография оживленной городской площади. Когда затвор фотоаппарата щелкнул (стартовал запрос или транзакция), на снимке зафиксированы только те люди, которые уже зашли на площадь (xmin committed). Те, кто еще только открывал дверь кафе (активные транзакции в xip_list), на фото выглядят полупрозрачными силуэтами и не учитываются. А те, кто прибежит через секунду после щелчка затвора, на снимок не попадут вовсе, даже если вы будете разглядывать фотографию целый час."
+      "title": "💡 На пальцах: Складывание коробок разной формы",
+      "content": "UUID v7 — это кирпичи, которые аккуратно кладутся в конец стены ряд за рядом. UUID v4 — это метеориты, которые падают в случайные места стены, разбивая уже уложенные кирпичи пополам (Page Splits) и требуя постоянной перестройки блоков."
     },
     {
       "type": "before-after-table",
       "data": {
-        "title": "Сравнение феноменов аномалий на уровнях изоляции в PostgreSQL",
-        "beforeDescription": "Стандартный уровень изоляции по умолчанию в PostgreSQL",
+        "title": "Сравнение производительности и поведения типов данных",
+        "beforeDescription": "Неоптимальные типы для финансового хранилища",
         "beforeColumns": [
-          "Уровень изоляции",
-          "Неповторяемое чтение (Non-repeatable read)",
-          "Фантомные строки (Phantom Read)"
+          "type_used",
+          "limitation",
+          "risk"
         ],
         "beforeRows": [
           [
-            "Read Committed",
-            "Возможно (данные меняются между SELECT)",
-            "Возможно (новые строки видны)"
+            "FLOAT8",
+            "Rounding errors",
+            "Financial audit failure"
           ],
           [
-            "Repeatable Read",
-            "Защищено (снимок заморожен на старте)",
-            "Защищено в Postgres через MVCC"
+            "TIMESTAMP",
+            "No timezone context",
+            "Time drift across regions"
           ],
           [
-            "Serializable",
-            "Защищено (SSI предикатные блокировки)",
-            "Защищено (полная эмуляция порядка)"
+            "UUID v4",
+            "Random distribution",
+            "B-Tree fragmentation & bloat"
           ]
         ],
-        "afterDescription": "Строгие уровни изоляции для финансовых и транзакционных сценариев",
+        "afterDescription": "Рекомендуемые типы Enterprise-стандарта",
         "afterColumns": [
-          "Уровень изоляции",
-          "Неповторяемое чтение (Non-repeatable read)",
-          "Фантомные строки (Phantom Read)"
+          "type_used",
+          "advantage",
+          "best_practice"
         ],
         "afterRows": [
           [
-            "Read Committed",
-            "Возможно (данные меняются между SELECT)",
-            "Возможно (новые строки видны)"
+            "NUMERIC(12,2)",
+            "Exact decimal precision",
+            "Mandatory for money"
           ],
           [
-            "Repeatable Read",
-            "Защищено (снимок заморожен на старте)",
-            "Защищено в Postgres через MVCC"
+            "TIMESTAMPTZ",
+            "UTC storage with conversion",
+            "Global time consistency"
           ],
           [
-            "Serializable",
-            "Защищено (SSI предикатные блокировки)",
-            "Защищено (полная эмуляция порядка)"
+            "UUID v7",
+            "Sequential B-Tree inserts",
+            "Zero page splits"
           ]
         ]
       }
@@ -148,47 +129,50 @@ export const postgresqlLesson2: Lesson = {
     {
       "type": "callout",
       "variant": "prod-danger",
-      "title": "⚠️ Грабли в проде: Зависшая транзакция (Idle in Transaction) и Wraparound авария",
-      "content": "Если аналитик или бэкенд открыл транзакцию `BEGIN;` и завис в состоянии `idle in transaction`, его снимок удерживает горизонт чистки `xmin`. Фоновый процесс AUTOVACUUM не имеет права удалять мертвые строки, созданные позже этой точки! За считанные часы таблицы раздуваются в 10 раз. Но худшее — счетчик XID приближается к 2^31 (лимит Wraparound). Когда до катастрофы остается 10 млн XID, PostgreSQL принудительно выключается в режим аварийного readonly и перестает принимать любые записи от клиентов!"
+      "title": "⚠️ Грабли в проде: FLOAT в расчете налогов привел к штрафу налоговой",
+      "content": "В платежном шлюзе сумма НДС рассчитывалась во `FLOAT8`. При суммировании 10 миллионов чеков накопилась погрешность округления в 42 000 рублей. Аудит выявил расхождение между счетами и выписками из банка. Переход на `NUMERIC(15,4)` полностью устранил ошибку."
     },
     {
       "type": "callout",
       "variant": "interview",
-      "title": "🎯 Спросят на собесе: Почему UPDATE в Postgres не делает блокировку на чтение, но создает нагрузку на дисковые индексы?",
-      "content": "Потому что читатели обращаются к старой версии строки (которая остается неизменной), сверяя xmax со своим снимком. Однако при создании новой версии строки создается новый ctid. Если обновленная колонка входит хотя бы в один индекс (или если на странице нет места для HOT-обновления), PostgreSQL обязан обновить записи во ВСЕХ индексах таблицы, многократно умножая write amplification."
+      "title": "🎯 Спросят на собесе: В чем физическая разница между JSON и JSONB?",
+      "content": "**Ответ:** `JSON` хранит точную текстовую копию ввода (включая форматирование пробелами и дубликаты ключей). `JSONB` при вставке парсит строку, удаляет лишние пробелы, устраняет дубликаты ключей (оставляя последнее значение) и сохраняет в бинарном формате с хэшированными смещениями ключей, что позволяет мгновенно извлекать поля без чтения всего документа и строить GIN-индексы."
     }
   ],
-  "taskDescription": "Перед вами таблица мониторинга сессий PostgreSQL `transaction_activity_monitor`. Для предотвращения зависания очистки MVCC и угрозы переполнения счетчика транзакций (Wraparound) напишите SQL-запрос, который:\n1. Отбирает подозрительные сессии в состоянии `idle in transaction` или `active`, работающие не менее 60 секунд (`duration_seconds >= 60`).\n2. Формирует категорию опасности `severity`:\n   - 'CRITICAL', если `duration_seconds >= 300`;\n   - 'WARNING', если `duration_seconds < 300`.\n3. Выбирает колонки: `pid`, `usename`, `state`, `duration_seconds`, `severity`.\n4. Сортирует результат по убыванию длительности `duration_seconds`.",
-  "seedCode": "CREATE TABLE transaction_activity_monitor (\n    pid INT PRIMARY KEY,\n    usename TEXT,\n    state TEXT,\n    duration_seconds INT,\n    xmin_horizon_age INT\n);\nINSERT INTO transaction_activity_monitor VALUES (4821, 'etl_worker', 'idle in transaction', 380, 450000);\nINSERT INTO transaction_activity_monitor VALUES (4822, 'analytics_dwh', 'active', 120, 120000);\nINSERT INTO transaction_activity_monitor VALUES (4823, 'web_api', 'idle', 5, 0);\nINSERT INTO transaction_activity_monitor VALUES (4824, 'bi_dashboard', 'idle in transaction', 75, 85000);\nINSERT INTO transaction_activity_monitor VALUES (4825, 'reporting_svc', 'idle in transaction', 20, 10000);",
-  "initialCode": "-- Выявите опасные транзакции, блокирующие очистку MVCC\nSELECT \n    pid,\n    usename,\n    state,\n    duration_seconds,\n    'WARNING' AS severity\nFROM transaction_activity_monitor;",
-  "solutionCode": "SELECT \n    pid,\n    usename,\n    state,\n    duration_seconds,\n    CASE \n        WHEN duration_seconds >= 300 THEN 'CRITICAL'\n        ELSE 'WARNING'\n    END AS severity\nFROM transaction_activity_monitor\nWHERE state IN ('idle in transaction', 'active')\n  AND duration_seconds >= 60\nORDER BY duration_seconds DESC;",
+  "taskDescription": "Создайте таблицу 'invoices' со следующими полями:\n- 'invoice_id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY'\n- 'client_uuid VARCHAR(36) NOT NULL'\n- 'total_rub NUMERIC(12,2) NOT NULL CHECK (total_rub > 0)'\n- 'metadata_json TEXT NOT NULL'\n- 'created_at TIMESTAMP NOT NULL'\nВставьте запись:\nclient_uuid = '018f4a12-7000-7abc', total_rub = 154000.50, metadata_json = '{\"source\": \"web\", \"tax_rate\": 0.20}', created_at = '2026-11-01 10:00:00'.\nВыведите все поля инвойса, у которого 'total_rub > 100000.00'.",
+  "seedCode": "",
+  "initialCode": "-- 1. Создайте таблицу invoices с полями invoice_id, client_uuid, total_rub, metadata_json, created_at\n-- 2. Вставьте тестовый инвойс\n-- 3. Выберите инвойсы с total_rub > 100000.00",
+  "solutionCode": "CREATE TABLE invoices (\n    invoice_id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,\n    client_uuid VARCHAR(36) NOT NULL,\n    total_rub NUMERIC(12,2) NOT NULL CHECK (total_rub > 0),\n    metadata_json TEXT NOT NULL,\n    created_at TIMESTAMP NOT NULL\n);\n\nINSERT INTO invoices (client_uuid, total_rub, metadata_json, created_at) VALUES\n('018f4a12-7000-7abc', 154000.50, '{\"source\": \"web\", \"tax_rate\": 0.20}', '2026-11-01 10:00:00');\n\nSELECT invoice_id, client_uuid, total_rub, metadata_json, created_at FROM invoices WHERE total_rub > 100000.00;",
   "testConfig": {
     "checkOrder": true,
     "floatPrecision": 2,
+    "expectedRowCount": 1,
+    "expectedColumns": [
+      "invoice_id",
+      "client_uuid",
+      "total_rub",
+      "metadata_json",
+      "created_at"
+    ],
     "requiredAstPatterns": [
-      "CASE",
-      "WHEN",
-      "WHERE",
-      "ORDER BY"
+      "NUMERIC",
+      "CHECK"
     ]
   },
   "brokenProdTask": {
-    "title": "Инцидент #302: Скрипт мониторинга пропускает зависшие транзакции",
-    "incidentDescription": "Скрипт алерта отслеживал только состояние 'active', пропуская опаснейшее состояние 'idle in transaction', из-за чего зависшая сессия заблокировала очистку таблицы на 6 часов и вызвала Bloat на 120 ГБ.",
-    "buggyCode": "SELECT pid, usename, duration_seconds FROM transaction_activity_monitor WHERE state = 'active' AND duration_seconds > 60;",
-    "fixHint": "Добавьте проверку состояния 'idle in transaction' через оператор IN ('active', 'idle in transaction').",
-    "solutionCode": "SELECT pid, usename, duration_seconds FROM transaction_activity_monitor WHERE state IN ('active', 'idle in transaction') AND duration_seconds > 60;",
+    "title": "Инцидент #302: Дробная погрешность FLOAT разрушила баланс счетов",
+    "incidentDescription": "В таблице счетов использовали FLOAT вместо NUMERIC, из-за чего проверка total_rub == 154000.50 не сработала.",
+    "buggyCode": "CREATE TABLE invoices (invoice_id INT PRIMARY KEY, total_rub FLOAT);\nINSERT INTO invoices VALUES (1, 154000.50);",
+    "fixHint": "Замените FLOAT на NUMERIC(12,2).",
+    "solutionCode": "CREATE TABLE invoices (invoice_id INT PRIMARY KEY, total_rub NUMERIC(12,2));\nINSERT INTO invoices VALUES (1, 154000.50);",
     "testConfig": {
       "checkOrder": false,
-      "floatPrecision": 2,
-      "requiredAstPatterns": [
-        "idle in transaction"
-      ]
+      "floatPrecision": 2
     }
   },
   "hints": [
-    "Используйте конструкцию CASE WHEN duration_seconds >= 300 THEN 'CRITICAL' ELSE 'WARNING' END AS severity.",
-    "Отфильтруйте состояния через state IN ('idle in transaction', 'active') и длительность duration_seconds >= 60.",
-    "Упорядочите вывод по убыванию времени работы: ORDER BY duration_seconds DESC."
+    "Для точного хранения денежных сумм используйте тип NUMERIC(12,2).",
+    "Добавьте ограничение CHECK (total_rub > 0).",
+    "Отфильтруйте результат через WHERE total_rub > 100000.00."
   ]
 };

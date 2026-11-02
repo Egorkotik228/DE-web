@@ -4,96 +4,72 @@ export const postgresqlLesson6: Lesson = {
   "id": "postgresql-6",
   "moduleSlug": "postgresql",
   "order": 6,
-  "title": "Чтение EXPLAIN (ANALYZE, BUFFERS), алгоритмы Scan/Join и статистика планировщика",
+  "title": "Память и надежность: Shared Buffers, WAL (Write-Ahead Log), Checkpoints и Background Writer",
   "estimatedMinutes": 40,
   "glossaryTerms": [
     {
-      "term": "Cost-Based Optimizer (CBO)",
-      "definition": "Планировщик запросов на основе стоимостной модели, рассчитывающий оптимальное дерево физических узлов выполнения по статистике распределения данных."
+      "term": "shared_buffers",
+      "definition": "Главный пул общей разделяемой оперативной памяти PostgreSQL (обычно 25%–40% RAM сервера), предназначенный для кэширования 8 КБ страниц таблиц и индексов."
     },
     {
-      "term": "EXPLAIN (ANALYZE, BUFFERS)",
-      "definition": "Инструмент глубокого профилирования SQL, который физически исполняет запрос и замеряет точное число прочитанных 8 КБ страниц из shared_buffers и диска."
+      "term": "WAL (Write-Ahead Log)",
+      "definition": "Журнал опережающей записи на диске (сегменты по 16 МБ), гарантирующий долговечность транзакций (Durability в ACID) за счет строго последовательной записи байт до сброса страниц в таблицы."
     },
     {
-      "term": "Bitmap Heap Scan",
-      "definition": "Двухфазный алгоритм: Bitmap Index Scan строит битовую карту номеров страниц с совпадениями, а Bitmap Heap Scan считывает их строго в физическом порядке расположения на диске."
+      "term": "Checkpoint (Контрольная точка)",
+      "definition": "Процесс принудительного упорядоченного сброса всех «грязных» страниц из shared_buffers на диск и фиксации точки восстановления (REDO Point), позволяющий удалять старые сегменты WAL."
     },
     {
-      "term": "Extended Statistics",
-      "definition": "Механизм CREATE STATISTICS, собирающий многомерную статистику зависимостей (dependencies) между взаимосвязанными колонками для предотвращения ошибок оценки кардинальности."
+      "term": "Full Page Writes (FPW)",
+      "definition": "Механизм защиты от частичной записи страниц (Torn Pages): при первом изменении страницы после чекпоинта ее образ размером 8 КБ целиком записывается в WAL."
     }
   ],
   "schemaPreview": [
     {
-      "tableName": "query_plan_benchmarks",
+      "tableName": "buffer_cache_stats",
       "columns": [
         {
-          "name": "query_id",
+          "name": "relname",
           "type": "TEXT",
           "keyType": "PK"
         },
         {
-          "name": "scan_type",
-          "type": "TEXT"
-        },
-        {
-          "name": "join_type",
-          "type": "TEXT"
-        },
-        {
-          "name": "estimated_rows",
+          "name": "heap_blks_read",
           "type": "INTEGER"
         },
         {
-          "name": "actual_rows",
+          "name": "heap_blks_hit",
           "type": "INTEGER"
         },
         {
-          "name": "shared_hit_blks",
-          "type": "INTEGER"
-        },
-        {
-          "name": "shared_read_blks",
+          "name": "dirty_buffers",
           "type": "INTEGER"
         }
       ],
       "sampleRows": [
         {
-          "query_id": "q_nested_loop_disaster",
-          "scan_type": "Seq Scan",
-          "join_type": "Nested Loop",
-          "estimated_rows": 5,
-          "actual_rows": 2500000,
-          "shared_hit_blks": 12000,
-          "shared_read_blks": 85000
+          "relname": "orders",
+          "heap_blks_read": 45000,
+          "heap_blks_hit": 855000,
+          "dirty_buffers": 1200
         },
         {
-          "query_id": "q_efficient_hash_join",
-          "scan_type": "Index Scan",
-          "join_type": "Hash Join",
-          "estimated_rows": 45000,
-          "actual_rows": 46200,
-          "shared_hit_blks": 154000,
-          "shared_read_blks": 210
+          "relname": "users",
+          "heap_blks_read": 2000,
+          "heap_blks_hit": 498000,
+          "dirty_buffers": 80
         },
         {
-          "query_id": "q_spill_merge_join",
-          "scan_type": "Bitmap Heap Scan",
-          "join_type": "Merge Join",
-          "estimated_rows": 80000,
-          "actual_rows": 810000,
-          "shared_hit_blks": 92000,
-          "shared_read_blks": 15400
+          "relname": "click_events",
+          "heap_blks_read": 720000,
+          "heap_blks_hit": 280000,
+          "dirty_buffers": 5400
         },
         {
-          "query_id": "q_simple_point_lookup",
-          "scan_type": "Index Scan",
-          "join_type": "None",
-          "estimated_rows": 1,
-          "actual_rows": 1,
-          "shared_hit_blks": 4,
-          "shared_read_blks": 0
+          "relname": "catalog_categories",
+          "heap_blks_read": 50,
+          "heap_blks_hit": 15000,
+          "dirty_buffers": 5
         }
       ]
     }
@@ -101,62 +77,62 @@ export const postgresqlLesson6: Lesson = {
   "theoryBlocks": [
     {
       "type": "markdown",
-      "content": "### Анатомия Cost-Based Optimizer (CBO): Как думает планировщик PostgreSQL\n\nКогда вы отправляете запрос в PostgreSQL, он не выполняется сразу. Движок проходит этапы: `Парсинг -> Анализ -> Переписывание (Rewrite) -> Планирование (Optimizer) -> Выполнение (Executor)`.\n\nПланировщик оценивает миллионы возможных деревьев выполнения и выбирает план с наименьшей расчетной стоимостью (**Cost**):\n```text\nSeq Scan on orders (cost=0.00..458.20 rows=1000 width=64)\n```\n- **0.00 (Startup Cost):** Затраты до получения первой строки (у `Seq Scan` это 0, а у `Sort` или `Hash Join` — высокое число, так как нужно сначала прочитать весь поток).\n- **458.20 (Total Cost):** Суммарная стоимость выполнения узла до конца в условных единицах дискового ввода-вывода (I/O Cost) и процессора (CPU Cost).\n- **Веса планировщика:** `seq_page_cost = 1.0` (чтение последовательного блока), `random_page_cost = 4.0` (случайное чтение; на современных NVMe SSD обязательно снижают до `1.1–1.5`), `cpu_tuple_cost = 0.01` (обработка строки в CPU).\n\n#### Почему EXPLAIN ANALYZE без BUFFERS слеп\nКоманда `EXPLAIN` показывает лишь теорию планировщика. Ключевое слово `ANALYZE` **реально исполняет запрос** и замеряет фактические цифры (`actual time`, `actual rows`).\n\n**⚠️ ОПАСНОСТЬ:** Если вы запустите `EXPLAIN ANALYZE DELETE FROM users;`, строки удалятся по-настоящему! Для модифицирующих команд всегда используйте: `BEGIN; EXPLAIN ANALYZE DELETE...; ROLLBACK;`.\n\nОбязательно добавляйте флаг `BUFFERS`: `EXPLAIN (ANALYZE, BUFFERS) SELECT...`:\n- `shared hit`: страницы, найденные в оперативной памяти `shared_buffers`.\n- `shared read`: страницы, прочитанные с физического диска (главный источник задержек).\n- `temp read / temp written`: маркер катастрофы! Памяти `work_mem` не хватило, и СУБД сбросила промежуточные данные сортировки или хэш-таблицы во временные файлы на диск.\n\n#### Три физических алгоритма сканирования (Scan Types)\n1. **Seq Scan:** Последовательное чтение всех страниц таблицы подряд. Оптимально, если выбирается более 15–20% строк таблицы.\n2. **Index Scan:** Чтение B-Tree, получение `ctid` и точечный прыжок в страницу Heap. Идеально для 1–100 строк. Но при 50 000 строк вызывает лавину случайных дисковых чтений.\n3. **Bitmap Index Scan + Bitmap Heap Scan:** Спасительный гибрид для средних выборок (1%–15% строк):\n   - Сначала `Bitmap Index Scan` строит битовую карту номеров страниц с совпадениями в памяти `work_mem`.\n   - Затем `Bitmap Heap Scan` считывает блоки таблицы строго последовательно по возрастанию адресов на диске.\n   - **Ловушка Lossy-блоков:** Если битовая карта не влезает в лимит `work_mem`, Postgres переключается в режим `lossy` (помнит только факт совпадения на странице, но не конкретные строки). В плане появляется `Heap Blocks: exact=120 lossy=4500` и узел `Recheck Cond`, повторно проверяющий условие на каждой строке в CPU!\n\n#### Три физических алгоритма соединения (JOIN)\n1. **Nested Loop:** Для каждой строки внешней таблицы сканирует внутреннюю (желательно по индексу). Идеально для маленьких выборок ($O(N \\log M)$). **Катастрофа:** если оптимизатор ошибся в оценке кардинальности ($N=5$ вместо $N=5\\,000\\,000$), цикл выполнит 5 миллионов вложенных сканирований и намертво повесит CPU на часы!\n2. **Hash Join:** Строит хэш-таблицу в памяти по меньшей таблице, затем одним проходом читает большую. Скорость $O(N + M)$. Если таблица не влезла в `work_mem`, в плане появляется `Batches: 16`, означающее сброс хэша на диск в несколько проходов.\n3. **Merge Join:** Соединяет два предварительно отсортированных потока (по индексу или после узла Sort) за один линейный проход $O(N + M)$.\n\n#### Статистика планировщика и расширенная статистика (CREATE STATISTICS)\nПланировщик строит гистограммы в `pg_stats`. Но по умолчанию он считает колонки независимыми:\n$P(A \\land B) = P(A) \\times P(B)$.\nДля колонок `make = 'Audi'` и `model = 'A6'` он перемножит их вероятности и посчитает, что совпадений будет 2 строки вместо реальных 50 000! Увидев 2 строки, он выберет смертельный `Nested Loop`.\n\n**Решение:**\n```sql\nCREATE STATISTICS st_cars (dependencies) ON make, model FROM cars;\nANALYZE cars;\n```"
+      "content": "### Архитектура памяти PostgreSQL: Общие буферы и память процессов\n\nМодель памяти PostgreSQL разделена на две фундаментальные зоны:\n1. **Общая память (Shared Memory):** Доступна всем процессам кластера. Главный компонент — `shared_buffers` (по умолчанию всего 128 МБ, в проде выделяют 25%–40% от всей оперативной памяти хоста). Здесь кэшируются 8-килобайтные страницы таблиц и индексов. Другие компоненты: `wal_buffers` (16–64 МБ) и таблицы блокировок (`lock table`).\n2. **Локальная память процесса (Local Memory):** Выделяется индивидуально каждому подключению backend-воркера:\n   - `work_mem`: Память для операций сортировки (`ORDER BY`), построения хэш-таблиц (`Hash Join`, `HashAggregate`) и оконных функций.\n   - `maintenance_work_mem`: Память для утилитных задач (`CREATE INDEX`, `VACUUM`, добавление внешних ключей).\n   - `temp_buffers`: Хранение временных таблиц сессии.\n\n#### Ловушка work_mem и Linux OOM Killer\nСамая опасная ошибка начинающего DBA — установить `work_mem = 1GB` в глобальном конфиге `postgresql.conf`.\nПараметр `work_mem` выделяется **не на сессию и не на запрос**, а **на каждый отдельный узел плана выполнения (Execution Plan Node)**!\nЕсли сложный аналитический запрос выполняет 4 операции сортировки и 3 хэш-джойна, он может аллоцировать `7 * 1GB = 7 ГБ RAM` в рамках одного запроса! При 50 одновременных пользователях сервер мгновенно расходует всю память и принудительно убивается ядром Linux (**SIGKILL, exit code 137**).\n\n#### Алгоритм Clock Sweep: Вытеснение страниц из shared_buffers\nКогда с диска нужно прочитать новую 8 КБ страницу, а в `shared_buffers` нет свободного места, СУБД использует алгоритм **Clock Sweep (часовой алгоритм)**:\n- Каждому буферу сопоставлен счетчик использования `usage_count` (число от 0 до 5).\n- Виртуальная стрелка часов обходит массив буферов по кругу:\n  - Если у страницы `usage_count > 0`, стрелка декрементирует его на 1 и идет дальше.\n  - Если `usage_count == 0` и страница не заблокирована, она выбирается жертвой на вытеснение.\n\n#### Журнал упреждающей записи (WAL) и гарантия Durability\nЕсли бы при каждом коммите сервер сбрасывал случайные 8 КБ страницы данных в файлы таблиц на диске, СУБД не могла бы обрабатывать больше 100–200 транзакций в секунду из-за случайного дискового I/O (Random I/O).\n\nPostgreSQL реализует принцип **WAL (Write-Ahead Logging)**:\n1. При изменении строки меняется 8 КБ страница в оперативной памяти (`shared_buffers`), она становится **«грязной» (dirty page)**.\n2. В компактный последовательный журнал **WAL** записывается бинарный diff изменений.\n3. При выполнении команды `COMMIT` СУБД гарантирует сброс на диск (через системный вызов `fsync`) **ТОЛЬКО записи WAL**! Это быстрый последовательный синхронный I/O. Пользователь получает ответ «OK», хотя сама таблица на диске еще не обновлена.\n\n#### Чекпоинты (Checkpoints), Background Writer и Full Page Writes\nКто и когда сбрасывает грязные страницы из `shared_buffers` на диск?\n1. **Checkpointer (Контрольная точка):** По таймеру (`checkpoint_timeout = 15min`) или объему накопившегося WAL (`max_wal_size = 16GB-64GB`) сбрасывает все накопившиеся грязные страницы на диск. Параметр `checkpoint_completion_target = 0.9` размазывает запись на 90% интервала, устраняя всплески дисковой нагрузки (I/O spikes).\n2. **Background Writer (bgwriter):** В непрерывном режиме сбрасывает небольшие порции грязных страниц чуть впереди стрелки Clock Sweep, чтобы у читающих процессов всегда были готовые чистые буферы.\n3. **Backend Writes (buffers_backend):** Худший сценарий. Если bgwriter не успевает, сам клиентский процесс останавливает выполнение своего SQL-запроса и лично сбрасывает чужую грязную страницу на диск. Рост `buffers_backend` — маркер критической нехватки дисковой подсистемы.\n4. **Full Page Writes (FPW):** Защита от повреждения блоков при сбое питания (Torn Pages). Если сервер выключится ровно посередине записи 8 КБ страницы, блок будет разрушен. Поэтому при первом изменении страницы после чекпоинта весь ее образ целиком сохраняется в WAL."
     },
     {
       "type": "callout",
       "variant": "analogy",
-      "title": "💡 На пальцах: Автомобильный навигатор с устаревшими картами",
-      "content": "Оптимизатор CBO — это автомобильный навигатор. Он не знает, что прямо сейчас происходит на дороге, но рассчитывает маршрут по сохраненной карте скоростей (статистике pg_stats). Если карты устарели (не запущен ANALYZE после вставки 50 млн строк в партицию), навигатор уверен, что узкая деревенская грунтовка свободна (rows=5), и отправляет 40-тонную фуру в тупик: выбирает Nested Loop вместо широкой скоростной магистрали Hash Join."
+      "title": "💡 На пальцах: Блокнот официанта и повара на кухне",
+      "content": "WAL — это блокнот официанта в переполненном ресторане. Принимая заказ, официант за секунду черкает три слова в блокнот (быстрый последовательный лог WAL) и отдает вам чек: «Ваш заказ принят!» (COMMIT). Если в зале погаснет свет, по блокноту точно восстановят, кто что заказал. А приготовление блюд и мытье посуды (Checkpointer и bgwriter) спокойно идет на кухне в фоновом режиме: повара не ждут, пока вы доедите, чтобы принять заказ у следующего столика."
     },
     {
       "type": "before-after-table",
       "data": {
-        "title": "Сравнение физических стратегий соединения таблиц (JOIN Algorithms)",
-        "beforeDescription": "Алгоритмы соединений и их вычислительная сложность",
+        "title": "Сравнение дефолтной и промышленной Highload конфигурации памяти PostgreSQL",
+        "beforeDescription": "Дефолтные устаревшие настройки PostgreSQL из коробки",
         "beforeColumns": [
-          "Алгоритм JOIN",
-          "Сложность и потребление RAM",
-          "Когда оптимален"
+          "Параметр памяти / WAL",
+          "Дефолтная конфигурация",
+          "Промышленный Highload тюнинг"
         ],
         "beforeRows": [
           [
-            "Nested Loop",
-            "O(N * log M), память O(1)",
-            "Маленькая внешняя таблица и индекс во внутренней"
+            "shared_buffers",
+            "128 МБ (рудимент старых ОС)",
+            "25% – 40% всей оперативной памяти"
           ],
           [
-            "Hash Join",
-            "O(N + M), требует work_mem под хэш",
-            "Средние и большие несортированные таблицы"
+            "max_wal_size и completion",
+            "1 ГБ и target = 0.5 (пилы I/O)",
+            "16–64 ГБ и target = 0.9 (размазывание)"
           ],
           [
-            "Merge Join",
-            "O(N + M), память O(1) при индексе",
-            "Большие таблицы, уже отсортированные по ключу"
+            "work_mem контроль",
+            "4 МБ (spill на диск в temp)",
+            "32–64 МБ с мониторингом соединений"
           ]
         ],
-        "afterDescription": "Сценарии применения в зависимости от индексов и объема памяти",
+        "afterDescription": "Оптимальная архитектура для высоконагруженных DWH и OLTP систем",
         "afterColumns": [
-          "Алгоритм JOIN",
-          "Сложность и потребление RAM",
-          "Когда оптимален"
+          "Параметр памяти / WAL",
+          "Дефолтная конфигурация",
+          "Промышленный Highload тюнинг"
         ],
         "afterRows": [
           [
-            "Nested Loop",
-            "O(N * log M), память O(1)",
-            "Маленькая внешняя таблица и индекс во внутренней"
+            "shared_buffers",
+            "128 МБ (рудимент старых ОС)",
+            "25% – 40% всей оперативной памяти"
           ],
           [
-            "Hash Join",
-            "O(N + M), требует work_mem под хэш",
-            "Средние и большие несортированные таблицы"
+            "max_wal_size и completion",
+            "1 ГБ и target = 0.5 (пилы I/O)",
+            "16–64 ГБ и target = 0.9 (размазывание)"
           ],
           [
-            "Merge Join",
-            "O(N + M), память O(1) при индексе",
-            "Большие таблицы, уже отсортированные по ключу"
+            "work_mem контроль",
+            "4 МБ (spill на диск в temp)",
+            "32–64 МБ с мониторингом соединений"
           ]
         ]
       }
@@ -164,51 +140,49 @@ export const postgresqlLesson6: Lesson = {
     {
       "type": "callout",
       "variant": "prod-danger",
-      "title": "⚠️ Грабли в проде: Забытый ANALYZE после ночного ETL-залива",
-      "content": "В ночном пайплайне в новую партицию залили 50 млн строк через быстрый COPY. Разработчик забыл выполнить ANALYZE. Утром первый же аналитический отчет выполнялся 3 часа вместо 10 секунд: планировщик посчитал таблицу пустой (rows=1), выбрал Nested Loop с 50 миллионами итераций. Всегда завершайте массовые вставки командой ANALYZE target_table!"
+      "title": "⚠️ Грабли в проде: Лавина Full Page Writes из-за маленького max_wal_size",
+      "content": "Если оставить дефолтный max_wal_size = 1GB на активной базе, чекпоинты начинают происходить каждые 30 секунд. При каждом чекпоинте сбрасывается флаг, и следующее изменение КАЖДОЙ страницы вызывает запись полных 8 КБ в WAL (Full Page Writes). В результате объем генерируемого WAL подскакивает в 5–10 раз, дисковая полка раскаляется до 100% утилизации, а репликация отстает на часы."
     },
     {
       "type": "callout",
       "variant": "interview",
-      "title": "🎯 Спросят на собесе: Что означает надпись «Batches: > 1» в Hash Join?",
-      "content": "В плане EXPLAIN надпись Batches: 1 означает, что вся хэш-таблица полностью поместилась в оперативную память, выделенную параметром work_mem. Если вы видите Batches: 4, 16 или 64 — это маркер нехватки work_mem: хэш-таблица не поместилась в память, была разбита на части и частично сброшена на диск во временные файлы, что вызывает сильное замедление из-за дискового ввода-вывода."
+      "title": "🎯 Спросят на собесе: Что физически происходит на диске при выполнении COMMIT?",
+      "content": "При выполнении команды COMMIT сервер PostgreSQL: 1) Генерирует в wal_buffers специальную запись commit record; 2) Вызывает системный вызов fsync() для сброса WAL-буфера на диск до физического энергонезависимого накопителя; 3) Помечает транзакцию зафиксированной в clog (pg_xact); 4) Освобождает удерживаемые блокировки heavyweight locks; 5) Возвращает клиенту подтверждение успешного коммита. Сами страницы данных в shared_buffers на диск НЕ сбрасываются — они будут записаны позже асинхронно Checkpointer или bgwriter."
     }
   ],
-  "taskDescription": "Перед вами таблица бенчмарков планов запросов `query_plan_benchmarks`. Для выявления катастрофических расхождений в оценке кардинальности напишите SQL-запрос, который:\n1. Рассчитывает кратность ошибки оценки строк планировщиком (`error_factor`): отношение большего значения к меньшему между `estimated_rows` и `actual_rows`: `ROUND(MAX(actual_rows * 1.0, estimated_rows * 1.0) / MIN(actual_rows * 1.0, estimated_rows * 1.0), 1)`.\n2. Фильтрует запросы, где оценка кардинальности разошлась не менее чем в 10 раз (`error_factor >= 10.0`) ИЛИ где количество физических чтений с диска составило не менее 10 000 блоков (`shared_read_blks >= 10000`).\n3. Выбирает поля: `query_id`, `scan_type`, `join_type`, `estimated_rows`, `actual_rows`, `error_factor`.\n4. Сортирует результат по убыванию коэффициента ошибки `error_factor`.",
-  "seedCode": "CREATE TABLE query_plan_benchmarks (\n    query_id TEXT PRIMARY KEY,\n    scan_type TEXT,\n    join_type TEXT,\n    estimated_rows INT,\n    actual_rows INT,\n    shared_hit_blks INT,\n    shared_read_blks INT\n);\nINSERT INTO query_plan_benchmarks VALUES ('q_nested_loop_disaster', 'Seq Scan', 'Nested Loop', 5, 2500000, 12000, 85000);\nINSERT INTO query_plan_benchmarks VALUES ('q_efficient_hash_join', 'Index Scan', 'Hash Join', 45000, 46200, 154000, 210);\nINSERT INTO query_plan_benchmarks VALUES ('q_spill_merge_join', 'Bitmap Heap Scan', 'Merge Join', 80000, 810000, 92000, 15400);\nINSERT INTO query_plan_benchmarks VALUES ('q_simple_point_lookup', 'Index Scan', 'None', 1, 1, 4, 0);\nINSERT INTO query_plan_benchmarks VALUES ('q_correlated_skew', 'Bitmap Heap Scan', 'Nested Loop', 20, 180000, 45000, 12000);",
-  "initialCode": "-- Выявите запросы с критическими ошибками планировщика и тяжелым дисковым чтением\nSELECT \n    query_id,\n    scan_type,\n    join_type,\n    estimated_rows,\n    actual_rows,\n    1.0 AS error_factor\nFROM query_plan_benchmarks;",
-  "solutionCode": "SELECT \n    query_id,\n    scan_type,\n    join_type,\n    estimated_rows,\n    actual_rows,\n    ROUND(MAX(actual_rows * 1.0, estimated_rows * 1.0) / MIN(actual_rows * 1.0, estimated_rows * 1.0), 1) AS error_factor\nFROM query_plan_benchmarks\nWHERE ROUND(MAX(actual_rows * 1.0, estimated_rows * 1.0) / MIN(actual_rows * 1.0, estimated_rows * 1.0), 1) >= 10.0\n   OR shared_read_blks >= 10000\nORDER BY error_factor DESC;",
+  "taskDescription": "Перед вами таблица `buffer_cache_stats`, собирающая метрики чтения из оперативной памяти (`heap_blks_hit`) и физических чтений с диска (`heap_blks_read`) по таблицам кластера. Для оценки качества кэширования в `shared_buffers` напишите SQL-запрос, который:\n1. Для каждой таблицы рассчитывает коэффициент попадания в кэш (`cache_hit_ratio`): `(heap_blks_hit * 100.0) / (heap_blks_hit + heap_blks_read)`, округленный до 2 знаков после запятой.\n2. Формирует статус эффективности кэширования (`cache_status`):\n   - 'OPTIMAL', если `cache_hit_ratio >= 95.0`;\n   - 'NEEDS_TUNING', если показатель ниже 95%.\n3. Фильтрует только достаточно нагруженные таблицы с суммарным числом обращений к блокам не менее 100 000 (`(heap_blks_hit + heap_blks_read) >= 100000`).\n4. Выводит поля: `relname`, `heap_blks_read`, `heap_blks_hit`, `cache_hit_ratio`, `cache_status`.\n5. Сортирует результат по убыванию количества дисковых чтений `heap_blks_read`.",
+  "seedCode": "CREATE TABLE buffer_cache_stats (\n    relname TEXT PRIMARY KEY,\n    heap_blks_read INT,\n    heap_blks_hit INT,\n    dirty_buffers INT\n);\nINSERT INTO buffer_cache_stats VALUES ('orders', 45000, 855000, 1200);\nINSERT INTO buffer_cache_stats VALUES ('users', 2000, 498000, 80);\nINSERT INTO buffer_cache_stats VALUES ('click_events', 720000, 280000, 5400);\nINSERT INTO buffer_cache_stats VALUES ('catalog_categories', 50, 15000, 5);\nINSERT INTO buffer_cache_stats VALUES ('temp_logs', 90000, 60000, 400);",
+  "initialCode": "-- Рассчитайте cache_hit_ratio и определите статус кэширования таблиц\nSELECT \n    relname,\n    heap_blks_read,\n    heap_blks_hit,\n    0.0 AS cache_hit_ratio,\n    'OPTIMAL' AS cache_status\nFROM buffer_cache_stats;",
+  "solutionCode": "SELECT \n    relname,\n    heap_blks_read,\n    heap_blks_hit,\n    ROUND((heap_blks_hit * 100.0) / (heap_blks_hit + heap_blks_read), 2) AS cache_hit_ratio,\n    CASE \n        WHEN ROUND((heap_blks_hit * 100.0) / (heap_blks_hit + heap_blks_read), 2) >= 95.0 THEN 'OPTIMAL'\n        ELSE 'NEEDS_TUNING'\n    END AS cache_status\nFROM buffer_cache_stats\nWHERE (heap_blks_hit + heap_blks_read) >= 100000\nORDER BY heap_blks_read DESC;",
   "testConfig": {
     "checkOrder": true,
-    "floatPrecision": 1,
+    "floatPrecision": 2,
     "requiredAstPatterns": [
       "ROUND",
-      "MAX",
-      "MIN",
+      "CASE",
+      "WHEN",
       "WHERE",
       "ORDER BY"
     ]
   },
   "brokenProdTask": {
-    "title": "Инцидент #306: Катастрофический выбор Nested Loop из-за скоррелированных колонок",
-    "incidentDescription": "Запрос фильтровал таблицу магазинов по полям country = 'US' и city = 'New York'. Планировщик перемножил вероятности, занизил оценку строк в 300 раз и выбрал мучительный Nested Loop. Требуется создать расширенную статистику зависимостей между колонками и собрать ее.",
-    "buggyCode": "SELECT * FROM stores WHERE country = 'US' AND city = 'New York';",
-    "fixHint": "Создайте расширенную статистику зависимостей CREATE STATISTICS st_geo (dependencies) ON country, city FROM stores; и выполните ANALYZE stores;.",
-    "solutionCode": "CREATE STATISTICS st_geo (dependencies) ON country, city FROM stores; ANALYZE stores; SELECT * FROM stores WHERE country = 'US' AND city = 'New York';",
+    "title": "Инцидент #304: Замедление аналитического запроса из-за сброса сортировки на диск (Work_mem Spill)",
+    "incidentDescription": "Сложный аналитический запрос начал выполняться 45 секунд. В плане EXPLAIN ANALYZE виден узел: Sort Method: external merge Disk: 48000kB, что означает нехватку work_mem и сброс промежуточных данных во временные файлы на диск. Требуется локально в рамках сессии увеличить лимит рабочей памяти до 64MB для ускорения вычислений в RAM.",
+    "buggyCode": "SELECT customer_id, SUM(amount) FROM payments GROUP BY customer_id ORDER BY SUM(amount) DESC;",
+    "fixHint": "Добавьте команду SET work_mem = '64MB'; перед выполнением аналитического запроса.",
+    "solutionCode": "SET work_mem = '64MB'; SELECT customer_id, SUM(amount) FROM payments GROUP BY customer_id ORDER BY SUM(amount) DESC;",
     "testConfig": {
       "checkOrder": false,
       "floatPrecision": 2,
       "requiredAstPatterns": [
-        "CREATE",
-        "STATISTICS",
-        "dependencies",
-        "ANALYZE"
+        "work_mem",
+        "64MB"
       ]
     }
   },
   "hints": [
-    "Для расчета коэффициента ошибки используйте: ROUND(MAX(actual_rows * 1.0, estimated_rows * 1.0) / MIN(actual_rows * 1.0, estimated_rows * 1.0), 1).",
-    "В предложении WHERE объедините условия через OR: error_factor >= 10.0 OR shared_read_blks >= 10000.",
-    "Отсортируйте результат по убыванию: ORDER BY error_factor DESC."
+    "Формула коэффициента попадания: ROUND((heap_blks_hit * 100.0) / (heap_blks_hit + heap_blks_read), 2).",
+    "Используйте CASE WHEN расчетное_значение >= 95.0 THEN 'OPTIMAL' ELSE 'NEEDS_TUNING' END AS cache_status.",
+    "Отфильтруйте таблицы условием (heap_blks_hit + heap_blks_read) >= 100000 и выполните сортировку ORDER BY heap_blks_read DESC."
   ]
 };
