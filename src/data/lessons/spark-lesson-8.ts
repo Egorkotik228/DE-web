@@ -134,98 +134,54 @@ export const sparkLesson8: Lesson = {
     {
       "type": "before-after-table",
       "data": {
-        "title": "Эффект применения broadcast() при соединении факта со справочником",
-        "beforeDescription": "Дефолтный SortMergeJoin без хинта (обе таблицы шафлятся)",
+        "title": "Сравнение Eager-вычислений (Pandas) и Lazy Evaluation (Spark)",
+        "beforeDescription": "Немедленные вычисления (Eager: Pandas)",
         "beforeColumns": [
-          "Тип Join",
-          "Объем Shuffle по сети",
-          "Время выполнения"
+          "processing_stage",
+          "memory_allocation",
+          "optimization_scope"
         ],
         "beforeRows": [
           [
-            "SortMergeJoin (дефолт)",
-            "2.0 TB (факт) + 20 MB (дим)",
-            "48 минут 30 сек"
+            "df = pd.read_csv('100GB.csv')",
+            "Loads 100GB into single RAM",
+            "Out-Of-Memory immediate crash"
           ],
           [
-            "Shuffle Spill Disk",
-            "180 GB промежуточных файлов",
-            "Высокая нагрузка на I/O"
+            "df = df[df['price'] > 100]",
+            "Filters already loaded data",
+            "Wasted read of discarded rows"
           ],
           [
-            "Сортировка ключей",
-            "100% CPU на всех экзекьюторах",
-            "Задержка очереди YARN"
+            "df = df[['id', 'price']]",
+            "Discards columns after read",
+            "Zero predicate/column pushdown"
           ]
         ],
-        "afterDescription": "BroadcastHashJoin с явным хинтом F.broadcast(dim)",
+        "afterDescription": "Ленивые вычисления (Lazy: Apache Spark)",
         "afterColumns": [
-          "Тип Join",
-          "Объем Shuffle по сети",
-          "Время выполнения"
+          "processing_stage",
+          "memory_allocation",
+          "optimization_scope"
         ],
         "afterRows": [
           [
-            "BroadcastHashJoin",
-            "0 байт для факта (только 20 MB дим)",
-            "2 минуты 15 сек"
+            "df = spark.read.parquet(...)",
+            "Instant 1ms metadata plan",
+            "Zero bytes read into memory"
           ],
           [
-            "Shuffle Spill Disk",
-            "0 байт (spill отсутствует)",
-            "Минимальный I/O диска"
+            "df = df.filter('price > 100')",
+            "Fused into scan filter",
+            "Pushed down into Parquet footer"
           ],
           [
-            "Потоковый Lookup",
-            "Параллельный доступ к хэш-карте",
-            "Снижение CPU в 8 раз"
+            "df.select('id', 'price').write",
+            "Reads ONLY 2 columns on action",
+            "Reads 1% of bytes at wire speed"
           ]
         ]
-      },
-      "beforeColumns": [
-        "Метрика / Узел",
-        "До оптимизации",
-        "Последствие"
-      ],
-      "afterColumns": [
-        "Метрика / Узел",
-        "После тюнинга",
-        "Результат"
-      ],
-      "beforeRows": [
-        [
-          "dropDuplicates / groupBy",
-          "Без вызова .withWatermark()",
-          "Бесконечный рост State Store и OOM"
-        ],
-        [
-          "Хранение больших стейтов",
-          "Дефолтный стейт в куче JVM",
-          "Долгие паузы GC на миллионах ключей"
-        ],
-        [
-          "Папка checkpointLocation",
-          "Локальная папка /tmp контейнера",
-          "Потеря оффсетов при рестарте пода"
-        ]
-      ],
-      "afterRows": [
-        [
-          "dropDuplicates + Watermark",
-          ".withWatermark('event_time', '12 hours')",
-          "Автоматическая очистка старых ключей"
-        ],
-        [
-          "Провайдер State Store",
-          "RocksDBStateStoreProvider (off-heap)",
-          "Стабильное хранение сотен млн ключей"
-        ],
-        [
-          "Папка checkpointLocation",
-          "Надежный бакет S3 или HDFS",
-          "Восстановление с точного оффсета"
-        ]
-      ]
+      }
     },
     {
       "type": "callout",

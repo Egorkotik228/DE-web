@@ -134,98 +134,54 @@ export const sparkLesson5: Lesson = {
     {
       "type": "before-after-table",
       "data": {
-        "title": "Эффект применения broadcast() при соединении факта со справочником",
-        "beforeDescription": "Дефолтный SortMergeJoin без хинта (обе таблицы шафлятся)",
+        "title": "Сравнение Eager-вычислений (Pandas) и Lazy Evaluation (Spark)",
+        "beforeDescription": "Немедленные вычисления (Eager: Pandas)",
         "beforeColumns": [
-          "Тип Join",
-          "Объем Shuffle по сети",
-          "Время выполнения"
+          "processing_stage",
+          "memory_allocation",
+          "optimization_scope"
         ],
         "beforeRows": [
           [
-            "SortMergeJoin (дефолт)",
-            "2.0 TB (факт) + 20 MB (дим)",
-            "48 минут 30 сек"
+            "df = pd.read_csv('100GB.csv')",
+            "Loads 100GB into single RAM",
+            "Out-Of-Memory immediate crash"
           ],
           [
-            "Shuffle Spill Disk",
-            "180 GB промежуточных файлов",
-            "Высокая нагрузка на I/O"
+            "df = df[df['price'] > 100]",
+            "Filters already loaded data",
+            "Wasted read of discarded rows"
           ],
           [
-            "Сортировка ключей",
-            "100% CPU на всех экзекьюторах",
-            "Задержка очереди YARN"
+            "df = df[['id', 'price']]",
+            "Discards columns after read",
+            "Zero predicate/column pushdown"
           ]
         ],
-        "afterDescription": "BroadcastHashJoin с явным хинтом F.broadcast(dim)",
+        "afterDescription": "Ленивые вычисления (Lazy: Apache Spark)",
         "afterColumns": [
-          "Тип Join",
-          "Объем Shuffle по сети",
-          "Время выполнения"
+          "processing_stage",
+          "memory_allocation",
+          "optimization_scope"
         ],
         "afterRows": [
           [
-            "BroadcastHashJoin",
-            "0 байт для факта (только 20 MB дим)",
-            "2 минуты 15 сек"
+            "df = spark.read.parquet(...)",
+            "Instant 1ms metadata plan",
+            "Zero bytes read into memory"
           ],
           [
-            "Shuffle Spill Disk",
-            "0 байт (spill отсутствует)",
-            "Минимальный I/O диска"
+            "df = df.filter('price > 100')",
+            "Fused into scan filter",
+            "Pushed down into Parquet footer"
           ],
           [
-            "Потоковый Lookup",
-            "Параллельный доступ к хэш-карте",
-            "Снижение CPU в 8 раз"
+            "df.select('id', 'price').write",
+            "Reads ONLY 2 columns on action",
+            "Reads 1% of bytes at wire speed"
           ]
         ]
-      },
-      "beforeColumns": [
-        "Метрика / Узел",
-        "До оптимизации",
-        "Последствие"
-      ],
-      "afterColumns": [
-        "Метрика / Узел",
-        "После тюнинга",
-        "Результат"
-      ],
-      "beforeRows": [
-        [
-          "Task Duration (Median / Max)",
-          "Median: 3 с / Max: 1.5 ч",
-          "1 ядро тянет 70% объема таблицы"
-        ],
-        [
-          "Shuffle Read по таскам",
-          "199 тасков по 20 МБ, 1 таск — 45 ГБ",
-          "Все NULL/guest ключи дали один hash()"
-        ],
-        [
-          "Shuffle Spill (Disk)",
-          "38 ГБ сброшено на локальный SSD",
-          "Партиция не влезла в Execution Memory"
-        ]
-      ],
-      "afterRows": [
-        [
-          "Task Duration (Median / Max)",
-          "Median: 4 с / Max: 6 с",
-          "Равномерная загрузка всех 200 ядер"
-        ],
-        [
-          "Shuffle Read по таскам",
-          "Все таски читают по ~220 МБ",
-          "Горячий ключ разбит солью на 16 бакетов"
-        ],
-        [
-          "Shuffle Spill (Disk)",
-          "0 Б (все расчеты в памяти)",
-          "Каждая суб-партиция помещается в RAM"
-        ]
-      ]
+      }
     },
     {
       "type": "callout",
